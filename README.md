@@ -6,23 +6,29 @@
 [![Tests](https://img.shields.io/badge/tests-72%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
 [![Unichain Sepolia](https://img.shields.io/badge/chain-Unichain%20Sepolia-lightgrey)](https://sepolia.uniscan.xyz)
 
-A Uniswap v4 hook that prices sandwich protection into the fee. Searchers post a bond in the pool's fee token to qualify for a swap-fee discount; a searcher whose own on-chain activity matches a same-block sandwich pattern gets slashed, and the confiscated capital goes straight to in-range LPs via `donate()`. No oracle, no swap, no off-chain watcher.
+A Uniswap v4 hook that makes sandwich attacks unprofitable instead of just detected. The cost of attacking is staked upfront: a searcher posts a bond in the pool's fee token to earn a lower swap fee, and when their own flow reads as a sandwich, that bond is slashed and held in an LP insurance reserve. No oracle, no swap, no off-chain watcher to run the core pool.
 
 This is a hackathon build for the UHI10 Hookathon. Testnet only, unaudited.
 
 ## Problem
 
-Sandwich attacks extract value by front-running a victim's swap, then back-running to realize the price move. The searcher who sandwiches is easy to identify after the fact by pattern, but v4 hooks are stateless between blocks and can't afford to Q-bird every tx. The standard answer, a fee rebate for honest searchers, has no teeth: nothing stops an attacker from claiming the rebate and attacking anyway.
+When you swap tokens, someone else can watch your order, buy just before you, move the price, then sell back to you at the worse price. They profit, you pay more. That is a sandwich attack, and it hits ordinary users hardest because they never see it coming.
+
+Standard answers either raise fees to deter attackers (which punishes honest traders too) or rebate honest searchers (which attackers can just claim). Neither makes low-fee, volatile-pair liquidity safe to provide.
 
 ## The design
 
-Two mechanisms pull against each other, and that tension is the point.
+Think of it as a rental-car security deposit.
 
-**Fee discount (the carrot).** A searcher who `bond()`s `token1` gets a `beforeSwap` fee override that cuts the pool's 30 bps fee on their swaps. The discount only attaches if the searcher keeps trading from the same bonded address.
+A trader who wants lower fees on this pool puts down a deposit in the pool's own token. As long as they trade honestly, they keep the deposit and pay a reduced fee. If they are caught sandwiching, part of their deposit is taken. The money taken goes into a reserve that pays the pool's liquidity providers.
 
-**Slash (the stick).** Reusing that same address across a sandwich is exactly what a sandwich looks like to this hook. The `afterSwap` detector checks each swap against the searcher's prior swap in the same block: same address, same block, reversed direction, an intervening swap from a different address. A match confiscates half the bond on first offense, escalates to a full slash plus a re-bonding ban on repeat, and routes the capital to in-range LPs.
+The load-bearing piece is the tension between the two sides:
 
-The bond is the load-bearing piece. A searcher only realizes the discount by keeping one bonded identity, but keeping one identity across a sandwich is precisely what trips detection. Bad actors can dodge it by spreading across fresh addresses, which is a disclosed v1 weakness, not a hidden one (see Adversarial analysis).
+**Fee discount (the carrot).** A searcher who `bond()`s `token1` gets a `beforeSwap` fee override that cuts the pool's 30 bps fee on their swaps. The discount only holds if the searcher keeps trading from the same bonded address.
+
+**Slash (the stick).** Reusing that same address across a sandwich is exactly what a sandwich looks like to this hook. The `afterSwap` detector checks each swap against the searcher's prior swap in the same block: same address, same block, reversed direction, an intervening swap from a different address. A match confiscates half the bond on first offense, escalates to a full slash plus a re-bonding ban on repeat, and the confiscated capital lands in the LP insurance reserve.
+
+The mechanism does not depend on catching every attacker. To get the discount, a searcher must trade from one visible identity, and trading from one visible identity is how a sandwich gets caught. An attacker who rotates through fresh addresses avoids detection, but forgoes the discount that made bonding worthwhile. Every evasion costs more than the attack earns.
 
 ## Architecture
 
@@ -33,7 +39,8 @@ flowchart TB
         Searcher -->|swap| PM[PoolManager]
         PM -.->|beforeSwap: fee override| V
         PM -.->|afterSwap: sandwich detect| V
-        V -->|slash -> donate| LP[In-range LPs]
+        V -->|slash| R[LP insurance reserve]
+        R -->|donate| LP[In-range LPs]
         V[VadiumHook] --> B[BondManager]
         V --> F[FeeDiscount]
         V --> D[SandwichDetector]
@@ -52,8 +59,9 @@ flowchart TB
 | 4. Match detection | same block, same address, reversed direction, intervening other address | Hook |
 | 5. First offense | slash 50% of bond, extend lock window | Hook |
 | 6. Repeat offense | full slash + ban from re-bonding | Hook |
-| 7. Donate | slashed token1 to in-range LPs via `donate()` | Hook |
-| 8. Withdraw | `withdrawBond()` after minimum duration | Searcher |
+| 7. Reserve | slashed token1 credited to the LP insurance reserve | Hook |
+| 8. Claim | owner/keeper routes reserve to in-range LPs via `donate()` | Hook |
+| 9. Withdraw | `withdrawBond()` after minimum duration | Searcher |
 
 ## Deployments
 
@@ -213,10 +221,16 @@ The integration tests run against a real `PoolManager` with per-user `SwapRouter
 
 ## Adversarial analysis
 
-This is the buildable subset of a sandwich, not a full sandwich detector. Disclosed v1 weaknesses:
+Detection alone cannot catch everyone, so the design does not rely on it. Three layers, in the order they matter:
 
-- Detection keys on address reuse. A searcher running two fresh wallets or a mule address across the sandwich legs is not matched. v2 countermeasure: a cross-address link prover or ordering analysis.
-- Detection is scoped to same-block, same-pool activity. Cross-pool, multi-block sequencing is out of scope.
+1. **On-pool detector.** Catches the obvious case instantly: same account, same block, reversing the trade. Runs in `afterSwap` on the hot path.
+2. **LP insurance reserve.** Even when a clever attacker slips through one layer, the pool keeps a standing fund of past penalties. LPs get recompensed on average, and the fund is visible onchain to anyone who checks. This is what makes imperfect detection acceptable.
+3. **Watchtower (in progress).** A separate, slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
+
+Disclosed v1 limits:
+
+- Same-address detection keys on address reuse. An attacker who rotates through fresh wallets dodges it, at the cost of forgoing the discount they bonded for.
+- Detection is scoped to same-block, same-pool activity. Cross-pool, multi-block sequencing is a watchtower concern, not a hook concern.
 - The per-swap detection bookkeeping in `afterSwap` costs gas for every swapper, bonded or not, since it runs on the hot path.
 
 Nothing here substitutes for an audit.
