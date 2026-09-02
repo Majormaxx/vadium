@@ -1,0 +1,25 @@
+# Env — never commit secrets
+.env
+.env.*
+!.env.example
+
+# Foundry artifacts
+cache/
+out/
+broadcast/*/31337/
+broadcast/*
+!broadcast/*/*.s.sol.json
+
+# Lock files
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+
+# Node
+node_modules/
+
+# OS
+.DS_Store
+
+# Gas snapshots (generated)
+.gas-snapshot

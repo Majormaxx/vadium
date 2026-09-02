@@ -1,0 +1,33 @@
+name: CI
+permissions: {}
+on: [push, pull_request, workflow_dispatch]
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  check:
+    name: Foundry project
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8bad0c8a4e52d2dcd0f5c5e5a37b5ac4f8a2e5e4 # v1.7.0
+
+      - name: Show Forge and Foundry config
+        run: |
+          forge --version
+          forge config
+
+      - name: Fmt check
+        run: forge fmt --check
+
+      - name: Build
+        run: forge build --sizes
+
+      - name: Run tests
+        run: forge test -vvv
