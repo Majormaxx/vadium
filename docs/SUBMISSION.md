@@ -44,7 +44,7 @@ The hard part was keeping the slashing honest. A same-block direction reversal i
 
 Moving the slash into the locked `afterSwap` callback added another layer. Settling the confiscated capital against the PoolManager without breaking v4 accounting took care, and the integration tests run against a real PoolManager with per-user routers precisely because in v4 the sender the hook sees is the router, not the EOA. Get that wrong and the detector never matches a single sandwich.
 
-The disclosed limit is that same-address detection keys on identity reuse. An attacker who spins up fresh wallets dodges it, though they forfeit the discount they bonded for. The next layer, a cross-account watchtower, closes that gap, and the insurance reserve means LPs are still recompensed on average in the meantime.
+The disclosed limit is that same-address detection keys on identity reuse. An attacker who spins up fresh wallets dodges it, though they forfeit the discount they bonded for. Two layers close that gap: the insurance reserve accumulates every penalty so LPs are recompensed on average even when a specific attack slips through, and the hook ships a watchtower slot. `flagFromWatchtower`, callable only by a one-time-assigned watchtower address, credits a live bond into the reserve and marks the address for the keeper, whose `drainFlagged` settles the whole reserve to LPs in a single atomic `unlock`. That is the on-chain anchor for a cross-account, cross-block Reactive observer that flags the pattern the hot-path detector cannot see.
 
 ## Demo video, slide deck, project link
 

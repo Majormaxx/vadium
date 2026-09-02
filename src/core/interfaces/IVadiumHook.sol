@@ -2,16 +2,14 @@
 pragma solidity ^0.8.26;
 
 /// @title IVadiumHook
-/// @notice Public interface for the Vadium hook — bonding, detection, and slashing.
+/// @notice Public interface for the Vadium hook — bonding, detection, slashing, and the
+///         LP insurance reserve.
 ///
 /// @dev    A Vadium-enabled pool lets searchers post a bond (denominated in the pool's
 ///         token1) in exchange for a swap-fee discount. Searchers whose own on-chain
 ///         behavior matches a sandwich pattern within the same block get slashed, and
-///         the slashed capital is donated to in-range LPs.
-///
-///         The interface here exposes the searcher-facing bond surface plus the view
-///         functions a frontend needs. The detection + slashing entrypoints are only
-///         reachable through the Uniswap v4 swap lifecycle, never directly.
+///         the slashed capital accumulates in a pooled insurance reserve. Authorized
+///         actors push that reserve out to in-range LPs in discrete drip payouts.
 interface IVadiumHook {
     // -------------------------------------------------------------------------
     // Bond lifecycle
@@ -30,7 +28,7 @@ interface IVadiumHook {
     ///
     /// @dev    Reverts if the minimum duration has not elapsed, or if the caller is
     ///         currently banned. Only withdraws the *remaining* bond (slashed amounts
-    ///         are already gone to LPs).
+    ///         are already parked in the insurance reserve).
     function withdrawBond() external;
 
     // -------------------------------------------------------------------------
@@ -52,4 +50,16 @@ interface IVadiumHook {
     /// @param searcher  Address to check.
     /// @return true if banned (until `bannedUntil`), false otherwise.
     function isBanned(address searcher) external view returns (bool);
+
+    /// @notice Token1 currently held in the LP insurance reserve.
+    function insuranceReserve() external view returns (uint256);
+
+    /// @notice Live coverage still available to pay out.
+    function remainingCoverage() external view returns (uint256);
+
+    /// @notice Cumulative token1 slashed and credited into the insurance reserve.
+    function slashedPledged() external view returns (uint256);
+
+    /// @notice Cumulative token1 paid out of the reserve to LPs.
+    function totalWithdrawn() external view returns (uint256);
 }

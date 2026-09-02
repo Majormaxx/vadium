@@ -3,7 +3,7 @@
 [![Solidity](https://img.shields.io/badge/solidity-0.8.26-blue)](https://soliditylang.org)
 [![Foundry](https://img.shields.io/badge/built%20with-Foundry-ff69b4)](https://book.getfoundry.sh)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-72%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
+[![Tests](https://img.shields.io/badge/tests-88%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
 [![Unichain Sepolia](https://img.shields.io/badge/chain-Unichain%20Sepolia-lightgrey)](https://sepolia.uniscan.xyz)
 
 A Uniswap v4 hook that makes sandwich attacks unprofitable instead of just detected. The cost of attacking is staked upfront: a searcher posts a bond in the pool's fee token to earn a lower swap fee, and when their own flow reads as a sandwich, that bond is slashed and held in an LP insurance reserve. No oracle, no swap, no off-chain watcher to run the core pool.
@@ -40,7 +40,7 @@ flowchart TB
         PM -.->|beforeSwap: fee override| V
         PM -.->|afterSwap: sandwich detect| V
         V -->|slash| R[LP insurance reserve]
-        R -->|donate| LP[In-range LPs]
+        K[Keeper] -->|drainFlagged / unlock| R -->|donate| LP[In-range LPs]
         V[VadiumHook] --> B[BondManager]
         V --> F[FeeDiscount]
         V --> D[SandwichDetector]
@@ -81,7 +81,7 @@ The hook address is CREATE2-mined so its lower 14 bits encode the required flags
 | Callback | Purpose |
 |---|---|
 | `beforeSwap` | Apply bonded fee discount via `OVERRIDE_FEE_FLAG` |
-| `afterSwap` | Record swap leg, run sandwich detection, slash + donate |
+| `afterSwap` | Record swap leg, run sandwich detection, slash + credit reserve |
 
 Detection and slashing run only inside the `afterSwap` callback, so they sit under v4's callback reentrancy lock. Bond transfers use `SafeERC20`. Callback entrypoints are gated by `onlyPoolManager`.
 
@@ -106,8 +106,25 @@ interface IVadiumHook {
     function isBonded(address searcher) external view returns (bool);
     function bondedBalance(address searcher) external view returns (uint256);
     function isBanned(address searcher) external view returns (bool);
+
+    function insuranceReserve() external view returns (uint256);
+    function remainingCoverage() external view returns (uint256);
+    function slashedPledged() external view returns (uint256);
+    function totalWithdrawn() external view returns (uint256);
 }
 ```
+
+## Insurance reserve
+
+Slashed token1 is not handed to LPs per sandwich. It accumulates in a pooled reserve, and an authorized actor pushes it out in discrete settlements through a single PoolManager `unlock`. Pooling the slashes and releasing them on demand is what makes an off-chain watchtower usable: the observer flags an address, and the payout is one atomic settle.
+
+| Function | Role | Effect |
+|---|---|---|
+| `flagFromWatchtower(searcher, amount, banUntil)` | watchtower | Record a flag; slash up to `amount` from a live bond into the reserve |
+| `drainFlagged(searchers)` | keeper | Push the full reserve to in-range LPs via one `unlock` |
+| `claimCoverage(amount)` | owner | Push a specific amount of reserve to in-range LPs |
+
+The reserve invariants are `slashedPledged >= withdrawn` (you can only pay out what was slashed) and `remainingCoverage == reserve` (live coverage available). The `_slash` callback credits the reserve without touching the pool, keeping slash cost off the swap hot path.
 
 ## Detection
 
@@ -132,10 +149,10 @@ uint256 slashed = b.computeSlash(isRepeat, FIRST_SLASH_BPS);
 
 | Operation | Gas |
 |---|---|
-| `bond` | 124,370 |
-| `withdrawBond` | 148,432 |
-| Non-sandwich swap through hook | 437,982 |
-| Sandwich -> slash + donate | 711,531 |
+| `bond` | 124,246 |
+| `withdrawBond` | 148,326 |
+| Non-sandwich swap through hook | 420,683 |
+| Sandwich -> slash + credit reserve | 714,467 |
 
 Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas deltas measured in `Integration.t.sol`; the constant per-swap detection bookkeeping in `afterSwap` is paid by every swapper on the pool, bonded or not.
 
@@ -146,6 +163,10 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 | `Bonded(address,uint256,uint256)` | searcher | Off-chain |
 | `BondWithdrawn(address,uint256)` | searcher | Off-chain |
 | `Sandwiched(address,uint256,bool,uint256,uint256)` | searcher | Off-chain |
+| `WatchtowerSet(address)` | watchtower | Audit |
+| `KeeperSet(address)` | keeper | Audit |
+| `Flagged(address,uint256,uint256)` | searcher | Watchtower UI |
+| `CoverageClaimed(uint256,uint256)` | -- | Off-chain |
 
 ## Custom errors
 
@@ -156,7 +177,10 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 | `Banned` | `uint256 bannedUntil` | Banned address bonds or withdraws |
 | `NoBond` | -- | Withdraw with no live bond |
 | `BondAlreadyActive` | -- | Re-bond while one is active |
-| `UnsupportedOperation` | -- | `unlock()` callback reached |
+| `Unauthorized` | -- | Role-gated call from the wrong address |
+| `AlreadySet` | -- | Set a watchtower or keeper a second time, or before drain |
+| `NotFlagged` | -- | Drain lists no, or an un-flagged, address |
+| `PayoutExceedsReserve` | `uint256 amount, uint256 reserve` | Claim exceeds live coverage |
 
 ## Access control
 
@@ -164,8 +188,11 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 |---|---|---|
 | Bond lifecycle | Anyone | `bond`, `withdrawBond` |
 | Swap callbacks | `PoolManager` only | `beforeSwap`, `afterSwap` (`onlyPoolManager`) |
+| Roles | owner | `setWatchtower`, `setKeeper`, `claimCoverage` |
+| Watchtower | one address | `flagFromWatchtower` |
+| Keeper | one address | `drainFlagged` |
 
-There is no wallet-admin role. Bonding is permissionless; callback entrypoints are locked to the PoolManager by `SafeCallback`. The deployer's only leverage is the CREATE2 salt that places the hook.
+The owner is the deployer (or the seed of `initializeOwner` when the hook is placed at its permission address without a constructor run). Watchtower and keeper are assigned once each. Bonding is permissionless; callback entrypoints are locked to the PoolManager by `SafeCallback`.
 
 ## Deploy
 
@@ -196,9 +223,10 @@ src/core/
 └── libraries/
     ├── BondManager.sol           # Two-tier slash + expiry math
     ├── FeeDiscount.sol           # Before-swap fee override rules
+    ├── InsurancePolicy.sol       # LP insurance reserve accounting
     └── SandwichDetector.sol      # Same-block sandwich match logic
 app/script/Deploy.s.sol           # CREATE2 salt mining + pool init
-test/                             # 72 tests (unit + integration + gas)
+test/                             # 88 tests (unit + integration + gas)
 ```
 
 ## Test
@@ -207,15 +235,15 @@ test/                             # 72 tests (unit + integration + gas)
 forge test
 ```
 
-72 tests across 5 suites, all green under the `fast` profile, `forge fmt --check` clean.
+88 tests across 5 suites, all green under the `fast` profile, `forge fmt --check` clean.
 
 | Suite | Area |
 |---|---|
-| `VadiumHook.t.sol` | Bond lifecycle, slash escalation, bans |
+| `VadiumHook.t.sol` | Bond lifecycle, slash escalation, bans, reserve, roles |
 | `BondManager.t.sol` | Slash math, expiry windows |
 | `FeeDiscount.t.sol` | Override rules, boundaries |
 | `SandwichDetector.t.sol` | Pattern matching |
-| `Integration.t.sol` | Per-user-router end-to-end + gas benchmarks |
+| `Integration.t.sol` | Per-user-router end-to-end, real reserve drain, gas benchmarks |
 
 The integration tests run against a real `PoolManager` with per-user `SwapRouter` instances, because in v4 the `sender` the hook sees in `afterSwap` is the router, not the EOA. Each actor gets its own router, and the router is the bonded identity.
 
@@ -225,7 +253,7 @@ Detection alone cannot catch everyone, so the design does not rely on it. Three 
 
 1. **On-pool detector.** Catches the obvious case instantly: same account, same block, reversing the trade. Runs in `afterSwap` on the hot path.
 2. **LP insurance reserve.** Even when a clever attacker slips through one layer, the pool keeps a standing fund of past penalties. LPs get recompensed on average, and the fund is visible onchain to anyone who checks. This is what makes imperfect detection acceptable.
-3. **Watchtower (in progress).** A separate, slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
+3. **Watchtower.** The hook exposes a one-time watchtower slot whose `flagFromWatchtower` can slash a live bond into the reserve and mark an address for the keeper's `drainFlagged`. That is the on-chain anchor for a separate, slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
 
 Disclosed v1 limits:
 

@@ -16,14 +16,16 @@ import { IPoolManager } from "v4-core/src/interfaces/IPoolManager.sol";
 
 import { BondManager } from "./libraries/BondManager.sol";
 import { FeeDiscount } from "./libraries/FeeDiscount.sol";
+import { InsurancePolicy } from "./libraries/InsurancePolicy.sol";
 import { SandwichDetector } from "./libraries/SandwichDetector.sol";
 import { IVadiumHook } from "./interfaces/IVadiumHook.sol";
 
 /// @title VadiumHook
 /// @notice Uniswap v4 hook that lets searchers post a bond in exchange for a swap-fee
 ///         discount, and slashes that bond when the searcher's own on-chain behavior
-///         matches a sandwich pattern within the same block. Slashed funds are routed
-///         to in-range LPs via `donate()`.
+///         matches a sandwich pattern within the same block. Slashed funds flow into an
+///         LP insurance reserve that an authorized keeper drains to in-range LPs via a
+///         single `unlock()`.
 ///
 /// @dev    The central design insight: the bond is what makes detection possible. A
 ///         searcher only benefits from bonding if they keep using the same bonded
@@ -34,7 +36,8 @@ import { IVadiumHook } from "./interfaces/IVadiumHook.sol";
 ///
 ///         The hook governs a single pool (locked at construction). The bond is
 ///         denominated in the pool's token1, which is also the token that gets slashed
-///         and donated — no oracle, no swap, no normalization needed.
+///         and held in the insurance reserve — no oracle, no swap, no normalization
+///         needed.
 ///
 ///         Detection is the buildable subset of a sandwich: same-address, same-block,
 ///         direction-reversal with an intervening swap from a different address. It is
@@ -50,6 +53,7 @@ contract VadiumHook is IHooks, SafeCallback {
     using CurrencyLibrary for Currency;
     using PoolIdLibrary for PoolKey;
     using LPFeeLibrary for uint24;
+    using InsurancePolicy for InsurancePolicy.InsuranceState;
 
     // -------------------------------------------------------------------------
     // Types
@@ -140,6 +144,27 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @notice Whether any swap has been recorded in the current block.
     bool public hasPriorSwap;
 
+    /// @notice Owner of the hook. Set once at construction to the deployer; controls the
+    ///         role assignments and the owner-gated `claimCoverage` payout.
+    address public owner;
+
+    /// @notice The reactive watchtower. Set once by the owner; the only address allowed
+    ///         to call `flagFromWatchtower`.
+    address public watchtower;
+
+    /// @notice The keeper. Set once by the owner; the only address allowed to call
+    ///         `drainFlagged` to push the reserve out to LPs.
+    address public keeper;
+
+    /// @notice The pooled LP insurance reserve.
+    InsurancePolicy.InsuranceState internal insurance;
+
+    /// @notice End-of-flag block for an address flagged by the watchtower. An address
+    ///         flagged via watchtower (without an on-chain bond) becomes eligible for
+    ///         the reserve payout only once it is drained through this map's presence
+    ///         during `drainFlagged`.
+    mapping(address searcher => uint256 flaggedUntil) public flaggedUntil;
+
     // -------------------------------------------------------------------------
     // Errors
     // -------------------------------------------------------------------------
@@ -159,8 +184,15 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @notice Reverts when re-bonding while a bond is already active.
     error BondAlreadyActive();
 
-    /// @notice Reverts if the unused `unlock`-callback dispatcher is reached.
-    error UnsupportedOperation();
+    /// @notice Reverts when an unauthorized caller uses a role-gated entrypoint.
+    error Unauthorized();
+
+    /// @notice Reverts when the watchtower or keeper role is set more than once.
+    error AlreadySet();
+
+    /// @notice Reverts when a payout or drain references an address that was not
+    ///         flagged, or lists no flagged addresses.
+    error NotFlagged();
 
     // -------------------------------------------------------------------------
     // Events
@@ -180,6 +212,19 @@ contract VadiumHook is IHooks, SafeCallback {
         uint256 remaining,
         uint256 bannedUntil
     );
+
+    /// @notice Emitted when the watchtower role is assigned (once).
+    event WatchtowerSet(address indexed watchtower);
+
+    /// @notice Emitted when the keeper role is assigned (once).
+    event KeeperSet(address indexed keeper);
+
+    /// @notice Emitted when the watchtower flags an address (and optionally slashes a
+    ///         live bond into the reserve).
+    event Flagged(address indexed searcher, uint256 slashed, uint256 flaggedUntil);
+
+    /// @notice Emitted when reserve capital is pushed out to in-range LPs.
+    event CoverageClaimed(uint256 amount, uint256 remainingReserve);
 
     // -------------------------------------------------------------------------
     // Constructor
@@ -211,6 +256,144 @@ contract VadiumHook is IHooks, SafeCallback {
 
         // The bond is ERC-20 token1, so the zero address (native token) is invalid.
         if (address(bondToken) == ZERO) revert("Vadium: bond token cannot be zero address");
+
+        // The deployer is the owner. Watchtower and keeper are assigned later, once,
+        // by the owner.
+        owner = msg.sender;
+    }
+
+    // -------------------------------------------------------------------------
+    // Roles
+    // -------------------------------------------------------------------------
+
+    modifier onlyOwner() {
+        if (msg.sender != owner) revert Unauthorized();
+        _;
+    }
+
+    modifier onlyWatchtower() {
+        if (msg.sender != watchtower) revert Unauthorized();
+        _;
+    }
+
+    modifier onlyKeeper() {
+        if (msg.sender != keeper) revert Unauthorized();
+        _;
+    }
+
+    /// @notice Bootstrap the owner when it is unset. Runs once, permissionless only
+    ///         because it can never fire on a normal deployment.
+    ///
+    /// @dev    The constructor sets `owner` on a regular deployment, so this reverts
+    ///         (`AlreadySet`) everywhere the constructor has run. It exists for the
+    ///         hook-at-permission-address pattern, where an implementation is deployed
+    ///         and its bytecode is etch-copied onto the permission-derived address
+    ///         without running the constructor (the local test harness does exactly
+    ///         this). In that case the owner slot is still zero and `initializeOwner`
+    ///         seeds it once.
+    function initializeOwner(address _owner) external {
+        if (_owner == ZERO) revert("Vadium: zero owner");
+        if (owner != ZERO) revert AlreadySet();
+        owner = _owner;
+    }
+
+    /// @notice Assign the watchtower, once. Owner-only. The watchtower is an off-chain
+    ///         reactive contract that flags addresses for the insurance payout.
+    function setWatchtower(address _watchtower) external onlyOwner {
+        if (_watchtower == ZERO) revert("Vadium: zero watchtower");
+        if (watchtower != ZERO) revert AlreadySet();
+        watchtower = _watchtower;
+        emit WatchtowerSet(_watchtower);
+    }
+
+    /// @notice Assign the keeper, once. Owner-only. The keeper can drain the insurance
+    ///         reserve out to LPs for flagged addresses.
+    function setKeeper(address _keeper) external onlyOwner {
+        if (_keeper == ZERO) revert("Vadium: zero keeper");
+        if (keeper != ZERO) revert AlreadySet();
+        keeper = _keeper;
+        emit KeeperSet(_keeper);
+    }
+
+    /// @notice Flag an address via the watchtower. Watchtower-only.
+    ///
+    /// @dev    Marks `searcher` as flagged until `banUntil`. If the address holds a live
+    ///         bond, up to `amount` of it is slashed into the reserve immediately (an
+    ///         on-chain bond lets the hook confiscate capital now, not in a later drain).
+    ///         An unbonded address is flagged but left for the keeper's later `drainFlagged`.
+    ///
+    /// @param searcher  Address to flag.
+    /// @param amount    Token1 to slash from a live bond (0 leaves the bond untouched and
+    ///                  only records the flag).
+    /// @param banUntil  Block before which the flag is considered active.
+    function flagFromWatchtower(address searcher, uint256 amount, uint256 banUntil)
+        external
+        onlyWatchtower
+    {
+        if (searcher == ZERO) revert("Vadium: zero searcher");
+        flaggedUntil[searcher] = banUntil;
+
+        BondManager.Bond storage b = bonds[searcher];
+        uint256 slashed = 0;
+        if (b.amount > 0) {
+            uint256 toSlash = amount > b.amount ? b.amount : amount;
+            if (toSlash > 0) {
+                b.amount -= toSlash;
+                slashed = toSlash;
+                insurance.credit(toSlash);
+            }
+        }
+
+        emit Flagged(searcher, slashed, banUntil);
+    }
+
+    /// @notice Push the full insurance reserve out to the pool's LPs. Keeper-only.
+    ///
+    /// @dev    Requires every listed address to hold an active watchtower flag. The
+    ///         payout happens through a real PoolManager `unlock`, so the settlement
+    ///         (donate + sync + settle) runs in one atomic callback. This is the path a
+    ///         Reactive watchtower would trigger on-chain.
+    ///
+    /// @param searchers  Flagged addresses that justify the payout.
+    /// @return amount    The token1 pushed out of the reserve.
+    function drainFlagged(address[] calldata searchers)
+        external
+        onlyKeeper
+        returns (uint256 amount)
+    {
+        if (searchers.length == 0) revert NotFlagged();
+        for (uint256 i = 0; i < searchers.length; i++) {
+            if (flaggedUntil[searchers[i]] == 0) revert NotFlagged();
+        }
+        return _payout(insurance.reserve);
+    }
+
+    /// @notice Push a specific amount of reserve capital out to the pool's LPs.
+    ///         Owner-only.
+    ///
+    /// @param amount  Token1 to release from the reserve.
+    /// @return The amount released.
+    function claimCoverage(uint256 amount) external onlyOwner returns (uint256) {
+        return _payout(amount);
+    }
+
+    /// @notice Release `amount` from the reserve to in-range LPs via a real unlock.
+    ///
+    /// @dev    `_unlockCallback` runs the donation (donate + sync + settle) against the
+    ///         PoolManager. The hook must hold the token1 it is donating; that capital
+    ///         is what accumulated in the reserve from bond slashes.
+    function _payout(uint256 amount) internal returns (uint256) {
+        uint256 taken = insurance.take(amount);
+        poolManager.unlock(abi.encode(taken));
+        emit CoverageClaimed(taken, insurance.reserve);
+        return taken;
+    }
+
+    /// @notice Executes the reserve payout inside the PoolManager's `unlock` callback.
+    function _unlockCallback(bytes calldata data) internal override returns (bytes memory) {
+        uint256 amount = abi.decode(data, (uint256));
+        _donate(amount);
+        return abi.encode(amount);
     }
 
     // -------------------------------------------------------------------------
@@ -371,11 +554,6 @@ contract VadiumHook is IHooks, SafeCallback {
     // Bond lifecycle
     // -------------------------------------------------------------------------
 
-    /// @notice Reverts. Vadium does not use `unlock()`; bond transfers are direct.
-    function _unlockCallback(bytes calldata) internal pure override returns (bytes memory) {
-        revert UnsupportedOperation();
-    }
-
     /// @notice Post a bond of `amount` token1. Grants the free discount.
     ///
     /// @dev    Bonding is permissionless. Requires `amount >= DEFAULT_MIN_BOND`.
@@ -446,6 +624,26 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @return true if banned until `bannedUntil`, false otherwise.
     function isBanned(address searcher) external view returns (bool) {
         return bonds[searcher].bannedUntil > block.number;
+    }
+
+    /// @notice Token1 currently held in the LP insurance reserve.
+    function insuranceReserve() external view returns (uint256) {
+        return insurance.remaining();
+    }
+
+    /// @notice Cumulative token1 slashed and credited into the insurance reserve.
+    function slashedPledged() external view returns (uint256) {
+        return insurance.slashedPledged;
+    }
+
+    /// @notice Cumulative token1 paid out of the reserve to LPs.
+    function totalWithdrawn() external view returns (uint256) {
+        return insurance.withdrawn;
+    }
+
+    /// @notice Live coverage still available to pay out. Identical to `insuranceReserve`.
+    function remainingCoverage() external view returns (uint256) {
+        return insurance.remaining();
     }
 
     // -------------------------------------------------------------------------
@@ -541,7 +739,9 @@ contract VadiumHook is IHooks, SafeCallback {
             b.strikeCount++;
         }
 
-        _donate(slashed);
+        // The slashed capital is parked in the LP insurance reserve, not donated
+        // instantly. A keeper later drains it to LPs in one atomic unlock.
+        insurance.credit(slashed);
 
         emit Sandwiched(sender, slashed, isRepeat, b.amount, bannedUntil);
     }
@@ -549,9 +749,10 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @notice Donate `amount1` of token1 to the pool's in-range LPs.
     ///
     /// @dev    The hook holds the bond token1. `donate()` routes one-sided token1 to
-    ///         in-range LPs with no swap or oracle. Inside the locked callback we call
-    ///         donate (which debits a token1 delta against the hook), then settle the
-    ///         owed token1 by syncing and transferring the donation to the PoolManager.
+    ///         in-range LPs with no swap or oracle. This runs inside the `unlock`
+    ///         callback during a reserve payout: donate (which debits a token1 delta
+    ///         against the hook), then settle the owed token1 by syncing and
+    ///         transferring the donation to the PoolManager.
     ///
     /// @param amount1  Amount of token1 to donate.
     function _donate(uint256 amount1) internal virtual {

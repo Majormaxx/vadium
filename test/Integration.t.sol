@@ -199,6 +199,10 @@ contract VadiumIntegrationTest is Test {
         vm.etch(hookAddr, address(hookImpl).code);
         hook = VadiumHook(hookAddr);
 
+        // The etch-copied contract never ran its constructor, so the owner slot is
+        // zero. Bootstrap the owner once (this can only fire while owner is unset).
+        hook.initializeOwner(address(this));
+
         // 5. Initialize pool
         poolKey = PoolKey({
             currency0: currency0,
@@ -272,10 +276,10 @@ contract VadiumIntegrationTest is Test {
     }
 
     // -------------------------------------------------------------------------
-    // Test: full loop — bond, fee-discounted swap, sandwich, slash, donate
+    // Test: full loop — bond, fee-discounted swap, sandwich, slash, reserve
     // -------------------------------------------------------------------------
 
-    function test_fullLoop_bondSwapSandwichSlashDonate() public {
+    function test_fullLoop_bondSwapSandwichSlashReserve() public {
         // --- Step 1: Searcher bonds via their router ---
         _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
         assertTrue(hook.isBonded(address(searcherRouter)));
@@ -298,16 +302,13 @@ contract VadiumIntegrationTest is Test {
             hook.bondedBalance(address(searcherRouter)), BOND_AMOUNT / 2, "bond should be halved"
         );
 
-        // --- Step 6: Verify donate ---
-        uint256 hookBalAfter = token1.balanceOf(address(hook));
-        assertEq(
-            hookBalBefore - hookBalAfter,
-            BOND_AMOUNT / 2,
-            "hook should have transferred slashed amount"
-        );
-
-        uint256 pmBal = token1.balanceOf(address(pm));
-        assertGe(pmBal, BOND_AMOUNT / 2, "pool manager should hold donated tokens");
+        // --- Step 6: Verify reserve (not immediate donation) ---
+        // The slashed capital parks in the insurance reserve. The hook physically
+        // retains its full token1 escrow (BOND_AMOUNT total), reclassified from the
+        // searcher's bond into the pooled reserve. Nothing reaches the PoolManager's
+        // LP payouts until a drain.
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2, "reserve holds the slashed amount");
+        assertEq(token1.balanceOf(address(hook)), hookBalBefore, "hook still escrows all token1");
     }
 
     // -------------------------------------------------------------------------
@@ -480,29 +481,71 @@ contract VadiumIntegrationTest is Test {
     // Test: donation amount matches slashed amount
     // -------------------------------------------------------------------------
 
-    function test_donationAmount_matchesSlashed() public {
+    function test_reserveAmount_matchesSlashed() public {
         _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
 
         uint256 hookBalBefore = token1.balanceOf(address(hook));
-        uint256 pmBalBefore = token1.balanceOf(address(pm));
 
-        // Sandwich -> first offense -> 50% slash, donates the slashed amount
+        // Sandwich -> first offense -> 50% slash, parked in the insurance reserve
         _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
         _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
         _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
 
         uint256 slashed = BOND_AMOUNT / 2;
 
-        // The hook's token1 escrow drops by exactly the slashed amount (the donation).
-        assertEq(
-            hookBalBefore - token1.balanceOf(address(hook)), slashed, "hook donated slashed amount"
-        );
+        // The slashed amount is credited to the reserve; the hook physically retains
+        // all token1 escrow. The pool manager receives nothing special for LPs until a
+        // drain (swap fees still accrue to it, so we only assert the hook's escrow).
+        assertEq(hook.insuranceReserve(), slashed, "reserve holds the slashed amount");
+        assertEq(token1.balanceOf(address(hook)), hookBalBefore, "hook still escrows all token1");
+    }
 
-        // The donation lands in the PoolManager. The PM's token1 also grew by swap fees
-        // realised during the sandwich, so it must hold at least the slashed amount on top
-        // of its pre-sandwich balance.
+    // Test: real reserve drain reaches the PoolManager via unlock
+    // -------------------------------------------------------------------------
+
+    function test_reserveDrain_landsInPoolManager() public {
+        // Set roles. owner == this (the test contract deployed the hook impl).
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        hook.setKeeper(makeAddr("kee"));
+
+        _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
+
+        // Build a 50e6 reserve via a real sandwich.
+        _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
+        _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
+        _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // The watchtower flags the searcher so the keeper drain has a justification.
+        vm.prank(watch);
+        hook.flagFromWatchtower(address(searcherRouter), 0, block.number + 100);
+
+        uint256 hookBalBefore = token1.balanceOf(address(hook));
+        uint256 pmBalBefore = token1.balanceOf(address(pm));
+
+        // The keeper drains the full reserve through a real unlock/donate/settle.
+        address[] memory flagged = new address[](1);
+        flagged[0] = address(searcherRouter);
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged);
+
+        assertEq(drained, BOND_AMOUNT / 2, "drain returns the full reserve");
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 2);
+
+        // The donation physically lands in the PoolManager. Swap fees accrued during
+        // the sandwich also hit the PM, so it must hold the drained amount on top of
+        // its pre-drain balance. The hook's escrow drops by exactly the drained amount.
         assertGe(
-            token1.balanceOf(address(pm)) - pmBalBefore, slashed, "PM received the slashed amount"
+            token1.balanceOf(address(pm)) - pmBalBefore,
+            BOND_AMOUNT / 2,
+            "PM received the drained reserve"
+        );
+        assertEq(
+            token1.balanceOf(address(hook)),
+            hookBalBefore - BOND_AMOUNT / 2,
+            "hook escrow drops by the drained reserve"
         );
     }
 
@@ -533,7 +576,7 @@ contract VadiumIntegrationTest is Test {
         assertTrue(used > 100_000, "non-sandwich swap should cost a meaningful amount of gas");
     }
 
-    function test_gas_sandwichSlashDonate() public {
+    function test_gas_sandwichSlashReserve() public {
         _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
 
         uint256 before = gasleft();
@@ -542,7 +585,7 @@ contract VadiumIntegrationTest is Test {
         _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
         uint256 gasAfter = gasleft();
         uint256 used = before - gasAfter;
-        // Sandwich detection + slash + donate execute within the final afterSwap.
+        // Sandwich detection + slash + reserve credit execute within the final afterSwap.
         assertTrue(used > 150_000, "sandwich slash path should cost a meaningful amount of gas");
     }
 

@@ -381,6 +381,7 @@ contract VadiumHookTest is Test {
 
         // Not bonded — _slash sees b.amount == 0 and returns early; nothing slashed.
         assertEq(hook.lastDonationAmount(), 0);
+        assertEq(hook.insuranceReserve(), 0);
     }
 
     // -------------------------------------------------------------------------
@@ -406,8 +407,10 @@ contract VadiumHookTest is Test {
         assertEq(depositAfter, 1000);
         assertEq(strikesAfter, 1);
 
-        // Donate amount equals the slashed amount.
-        assertEq(hook.lastDonationAmount(), BOND_AMOUNT / 2);
+        // Donate amount stays zero at slash time; the slashed capital is parked in the
+        // LP insurance reserve, not donated instantly.
+        assertEq(hook.lastDonationAmount(), 0);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
     }
 
     function test_repeatOffense_slashesAndBans() public {
@@ -460,7 +463,7 @@ contract VadiumHookTest is Test {
         hook.bond(BOND_AMOUNT);
     }
 
-    function test_donationAmount_matchesSlashedAmount() public {
+    function test_reserveAmount_matchesSlashedAmount() public {
         vm.startPrank(searcher);
         hook.bond(BOND_AMOUNT);
         vm.stopPrank();
@@ -470,8 +473,10 @@ contract VadiumHookTest is Test {
         hook.recordSwap(victim, false);
         hook.recordSwap(searcher, false);
 
-        // First offense: 50% of 100e6 = 50e6.
-        assertEq(hook.lastDonationAmount(), 50e6);
+        // First offense: 50% of 100e6 = 50e6 parks in the reserve. Pledged follows.
+        assertEq(hook.insuranceReserve(), 50e6);
+        assertEq(hook.slashedPledged(), 50e6);
+        assertEq(hook.totalWithdrawn(), 0);
     }
 
     function test_multipleSequentialSwapsInBlock_noFalsePositive() public {
@@ -491,14 +496,232 @@ contract VadiumHookTest is Test {
     }
 
     // -------------------------------------------------------------------------
+    // Watchtower + insurance reserve
+    // -------------------------------------------------------------------------
+
+    function test_roles_onlyOwnerCanAssign() public {
+        address watch = makeAddr("watch");
+        address kee = makeAddr("kee");
+
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.setWatchtower(watch);
+
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.setKeeper(kee);
+
+        assertEq(hook.watchtower(), address(0), "watchtower unset");
+        assertEq(hook.keeper(), address(0), "keeper unset");
+    }
+
+    function test_setWatchtower_onceThenReverts() public {
+        address watch = makeAddr("watch");
+        // owner == this (the test contract deployed the hook).
+        hook.setWatchtower(watch);
+        assertEq(hook.watchtower(), watch);
+
+        vm.expectRevert();
+        hook.setWatchtower(makeAddr("watch2"));
+    }
+
+    function test_setKeeper_onceThenReverts() public {
+        address kee = makeAddr("kee");
+        hook.setKeeper(kee);
+        assertEq(hook.keeper(), kee);
+
+        vm.expectRevert();
+        hook.setKeeper(makeAddr("kee2"));
+    }
+
+    function test_flagFromWatchtower_onlyWatchtower() public {
+        vm.expectRevert();
+        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+    }
+
+    function test_flagFromWatchtower_slashesBondIntoReserve() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10);
+
+        // Bond split: half stays, half moves into the reserve. Flag recorded.
+        assertEq(hook.bondedBalance(searcher), BOND_AMOUNT / 2);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+        assertEq(hook.slashedPledged(), BOND_AMOUNT / 2);
+        assertEq(hook.flaggedUntil(searcher), block.number + 10);
+    }
+
+    function test_flagFromWatchtower_capsSlashAtBond() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        // Request more than the full bond; the slash is capped at the bond balance.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, type(uint256).max, block.number);
+        assertEq(hook.bondedBalance(searcher), 0);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT);
+    }
+
+    function test_flagFromWatchtower_unbondedFlagOnly() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT, block.number + 20);
+
+        // No bond to slash, but the flag is recorded for a later keeper drain.
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.flaggedUntil(searcher), block.number + 20);
+    }
+
+    function test_claimCoverage_onlyOwner() public {
+        address kee = makeAddr("kee");
+        hook.setKeeper(kee);
+
+        vm.prank(kee);
+        vm.expectRevert();
+        hook.claimCoverage(1);
+    }
+
+    function test_claimCoverage_drainsReserve() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // Build a 50e6 reserve via a sandwich slash.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // Owner (this) claims the reserve. The mocked _donate records the payout.
+        hook.claimCoverage(BOND_AMOUNT / 2);
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.slashedPledged(), BOND_AMOUNT / 2);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 2);
+        assertEq(hook.lastDonationAmount(), BOND_AMOUNT / 2);
+    }
+
+    function test_claimCoverage_exceedsReserve_reverts() public {
+        assertEq(hook.insuranceReserve(), 0);
+        vm.expectRevert();
+        hook.claimCoverage(1);
+    }
+
+    function test_drainFlagged_onlyKeeper() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(victim, 0, block.number + 10);
+
+        address[] memory flagged = new address[](1);
+        flagged[0] = victim;
+
+        // Random caller, not the keeper -> unauthorized.
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.drainFlagged(flagged);
+    }
+
+    function test_drainFlagged_requiresFlag() public {
+        hook.setKeeper(makeAddr("kee"));
+
+        address[] memory flagged = new address[](1);
+        flagged[0] = victim; // never flagged
+
+        vm.prank(hook.keeper());
+        vm.expectRevert();
+        hook.drainFlagged(flagged);
+    }
+
+    function test_drainFlagged_emptyList_reverts() public {
+        hook.setKeeper(makeAddr("kee"));
+
+        address[] memory flagged = new address[](0);
+        vm.prank(hook.keeper());
+        vm.expectRevert();
+        hook.drainFlagged(flagged);
+    }
+
+    function test_drainFlagged_pushesReserve() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // Build a reserve with two slashes credited to the same flagged address.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+
+        uint256 hookBalBefore = token1.balanceOf(address(hook));
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged);
+
+        assertEq(drained, BOND_AMOUNT / 2, "drain returns the full reserve");
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 2);
+        // The mocked _donate does not move real tokens; it records the payout.
+        assertEq(hook.lastDonationAmount(), BOND_AMOUNT / 2);
+        assertEq(token1.balanceOf(address(hook)), hookBalBefore, "mock donate leaves escrow alone");
+    }
+
+    function test_repeatSlash_accumulatesReserve() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First offense: 50e6 into reserve, bond 50e6.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // Repeat offense within the lock: the remaining 50e6 is fully slashed and
+        // added on top of the reserve.
+        vm.roll(1001);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        assertEq(hook.bondedBalance(searcher), 0);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT);
+        assertEq(hook.slashedPledged(), BOND_AMOUNT);
+        assertTrue(hook.isBanned(searcher));
+    }
+
+    // -------------------------------------------------------------------------
     // Errors and edge cases
     // -------------------------------------------------------------------------
 
-    function test_unsupportedOperation_reverts() public {
-        // unlockCallback is only callable by the pool manager; it then runs the
-        // hook's _unlockCallback, which reverts with UnsupportedOperation.
-        vm.prank(pmAddr);
-        vm.expectRevert(VadiumHook.UnsupportedOperation.selector);
+    function test_unlockCallback_onlyPoolManager() public {
+        // unlockCallback must only be reachable from the PoolManager; any other caller
+        // reverts. The pool manager then runs the hook's _unlockCallback, which now
+        // performs the reserve payout.
+        vm.prank(address(0xBEEF));
+        vm.expectRevert();
         hook.unlockCallback("");
     }
 
