@@ -3,7 +3,7 @@
 [![Solidity](https://img.shields.io/badge/solidity-0.8.26-blue)](https://soliditylang.org)
 [![Foundry](https://img.shields.io/badge/built%20with-Foundry-ff69b4)](https://book.getfoundry.sh)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
+[![Tests](https://img.shields.io/badge/tests-121%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
 [![Unichain Sepolia](https://img.shields.io/badge/chain-Unichain%20Sepolia-lightgrey)](https://sepolia.uniscan.xyz)
 
 A Uniswap v4 hook that makes sandwich attacks unprofitable instead of just detected. The cost of attacking is staked upfront: a searcher posts a bond in the pool's fee token to earn a lower swap fee, and when their own flow reads as a sandwich, that bond is slashed and held in an LP insurance reserve. No oracle, no swap, no off-chain watcher to run the core pool.
@@ -44,9 +44,16 @@ flowchart TB
         V[VadiumHook] --> B[BondManager]
         V --> F[FeeDiscount]
         V --> D[SandwichDetector]
+        V -->|Sandwiched event| RN[Reactive Network]
+    end
+
+    subgraph Lasna["Lasna Testnet"]
+        RN -->|subscribe + react| RSC[VadiumReactive RSC]
+        RSC -->|callback: onWatchtowerFlag| V
     end
 
     style Unichain fill:#e3f5fd,color:#1a1a2e,stroke:#90caf9
+    style Lasna fill:#f5f0ff,color:#1a1a2e,stroke:#bb86fc
 ```
 
 ## System lifecycle
@@ -71,6 +78,20 @@ Nothing is deployed yet; addresses are filled after the testnet broadcast.
 |---|---|---|
 | `VadiumHook` | Unichain Sepolia (1301) | pending |
 | Vadium pool | Unichain Sepolia (1301) | pending |
+| `VadiumReactive` RSC | Lasna testnet (5318007) | pending |
+
+## Reactive watchtower sidecar
+
+A full-featured Reactive Smart Contract (`src/reactive/VadiumReactive.sol`) turns the hook into a cross-chain watcher with a real, non-stubbed pipeline. When the hook slashes a searcher on Unichain Sepolia, it emits a `Sandwiched` log. The Reactive Network watches that log:
+
+1. The RSC holds a subscription to the hook's `Sandwiched` event on the origin chain.
+2. On a matched block the ReactVM calls `react()`, which dedups by origin tx hash, decodes the searcher and ban window, and emits a `Callback` back to the hook.
+3. The Reactive Network injects the ReactVM ID as the callback's first argument (the placeholder the RSC emits as `address(0)`).
+4. The hook's `onlyCallbackProxy` entrypoint verifies the RVM ID matches its bound watchtower and applies the flag.
+
+The callback path is the same one the local watchtower uses: `onWatchtowerFlag` sets a live flag that strips the searcher's fee discount and records a strike under the same two-tier rules, keeping the reserve and ban bookkeeping on-chain and auditable.
+
+The deploy uses two separate addresses for the subscription source (`originContract`) and the callback destination (`callbackTarget`); in production both are the hook. The split exists so tests can point the subscription at a fixture emitter while the callback still lands on the real hook.
 
 ## Contract
 
@@ -169,6 +190,7 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 | `KeeperSet(address)` | keeper | Audit |
 | `Flagged(address,uint256,uint256)` | searcher | Watchtower UI |
 | `CoverageClaimed(uint256,uint256)` | -- | Off-chain |
+| `Callback(...)` (RSC) | -- | Reactive Network |
 
 ## Custom errors
 
@@ -192,9 +214,10 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 | Swap callbacks | `PoolManager` only | `beforeSwap`, `afterSwap` (`onlyPoolManager`) |
 | Roles | owner | `setWatchtower`, `setKeeper`, `claimCoverage` |
 | Watchtower | one address | `flagFromWatchtower` |
+| Callback proxy | Reactive callback proxy | `onWatchtowerFlag` (`onlyCallbackProxy`) |
 | Keeper | one address | `drainFlagged` |
 
-The owner is the deployer (or the seed of `initializeOwner` when the hook is placed at its permission address without a constructor run). Watchtower and keeper are assigned once each. Bonding is permissionless; callback entrypoints are locked to the PoolManager by `SafeCallback`.
+The owner is the deployer (or the seed of `initializeOwner` when the hook is placed at its permission address without a constructor run). Watchtower and keeper are assigned once each. Bonding is permissionless; callback entrypoints are locked to the PoolManager by `SafeCallback`. The Reactive entrypoint `onWatchtowerFlag` is locked to the configured callback proxy by `onlyCallbackProxy` and verifies that the injected ReactVM ID matches the bound watchtower.
 
 ## Deploy
 
@@ -216,6 +239,16 @@ The script guards `block.chainid == 1301`, mines the CREATE2 salt, deploys via t
 
 Pool: native ETH (`token0`) / USDC (`token1`), static 30 bps fee, tick spacing 10.
 
+The Reactive sidecar deploys separately to the Lasna testnet (chain ID 5318007):
+
+```
+forge script app/script/DeployReactive.s.sol:DeployVadiumReactive \
+  --rpc-url "$REACTIVE_LASNA_RPC" \
+  --broadcast -vvvv
+```
+
+The RSC takes the origin chain ID, the hook address (used for both the subscription source and the callback target), a callback gas limit, and the deployer as owner. After both deploys land, the hook owner binds the RSC's address as the watchtower with `setWatchtower`, so callbacks from the ReactVM are accepted and applied.
+
 ## Structure
 
 ```
@@ -227,8 +260,11 @@ src/core/
     ├── FeeDiscount.sol           # Before-swap fee override rules
     ├── InsurancePolicy.sol       # LP insurance reserve accounting
     └── SandwichDetector.sol      # Same-block sandwich match logic
+src/reactive/
+└── VadiumReactive.sol            # Cross-chain watchtower RSC (Reactive Network)
 app/script/Deploy.s.sol           # CREATE2 salt mining + pool init
-test/                             # 96 tests (unit + integration + gas)
+app/script/DeployReactive.s.sol   # Lasna RSC deploy
+test/                             # 121 tests (unit + integration + reactive + gas)
 ```
 
 ## Test
@@ -237,11 +273,12 @@ test/                             # 96 tests (unit + integration + gas)
 forge test
 ```
 
-96 tests across 5 suites, all green under the `fast` profile, `forge fmt --check` clean.
+121 tests across 6 suites, all green under the `fast` profile, `forge fmt --check` clean.
 
 | Suite | Area |
 |---|---|
-| `VadiumHook.t.sol` | Bond lifecycle, slash escalation, bans, reserve, roles |
+| `VadiumHook.t.sol` | Bond lifecycle, slash escalation, bans, reserve, roles, watchtower flag entrypoint |
+| `React.t.sol` | Reactive sidecar end-to-end: subscription, reaction, cross-chain callback injection, dedup |
 | `BondManager.t.sol` | Slash math, expiry windows |
 | `FeeDiscount.t.sol` | Override rules, boundaries |
 | `SandwichDetector.t.sol` | Pattern matching |
@@ -255,7 +292,9 @@ Detection alone cannot catch everyone, so the design does not rely on it. Three 
 
 1. **On-pool detector.** Catches the obvious case instantly: same account, same block, reversing the trade. Runs in `afterSwap` on the hot path.
 2. **LP insurance reserve.** Even when a clever attacker slips through one layer, the pool keeps a standing fund of past penalties. LPs get recompensed on average, and the fund is visible onchain to anyone who checks. This is what makes imperfect detection acceptable.
-3. **Watchtower.** The hook exposes a one-time watchtower slot whose `flagFromWatchtower` can slash a live bond into the reserve and mark an address for the keeper's `drainFlagged`. That is the on-chain anchor for a separate, slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
+3. **Watchtower.** The hook exposes a one-time watchtower slot whose `flagFromWatchtower` can slash a live bond into the reserve and mark an address for the keeper's `drainFlagged`. That is the on-chain anchor for a slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
+
+The watchtower is implemented as a Reactive Smart Contract (`VadiumReactive`) rather than a bespoke off-chain watcher. The hook's `Sandwiched` log fires through the Reactive Network, the RSC reacts and emits a callback, and the hook applies it through the verified callback-proxy entrypoint. Because a flag strips the discounted fee for its duration and extends the bond's withdrawal lock, an evader cannot keep trading cheap while flagged and cannot walk away with the residual bond. This is the on-chain anchor for a cross-account, cross-block observer that flags the pattern the hot-path detector cannot see.
 
 Disclosed v1 limits:
 

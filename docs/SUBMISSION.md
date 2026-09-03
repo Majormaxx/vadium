@@ -46,6 +46,8 @@ Moving the slash into the locked `afterSwap` callback added another layer. Settl
 
 The disclosed limit is that same-address detection keys on identity reuse. An attacker who spins up fresh wallets dodges it, though they forfeit the discount they bonded for. Two layers close that gap: the insurance reserve accumulates every penalty so LPs are recompensed on average even when a specific attack slips through, and the hook ships a watchtower slot. `flagFromWatchtower`, callable only by a one-time-assigned watchtower address, credits a live bond into the reserve, counts the same strike as the on-pool detector, and marks the address for the keeper, whose `drainFlagged` settles the whole reserve to LPs in a single atomic `unlock`. A flag also strips the discounted fee for its duration, and the slash extends the bond's withdrawal lock, so an evader cannot keep trading cheap while flagged and cannot walk away with the residual bond. That is the on-chain anchor for a cross-account, cross-block Reactive observer that flags the pattern the hot-path detector cannot see.
 
+That observer is a working Reactive Smart Contract (`VadiumReactive`), not a stub. The hook's `Sandwiched` log fires through the Reactive Network; the RSC holds the subscription, dedups by origin transaction, decodes the searcher and ban window, and emits a `Callback` that lands back on the hook through a callback-proxy entrypoint. The entrypoint confirms the injected ReactVM ID against the bound watchtower before applying the flag, so the cross-chain path is auditable and exercised end-to-end in the test suite, including the ReactVM-id injection and the callback payload the network rewrites on the way through.
+
 ## Demo video, slide deck, project link
 
 - Demo video: (fill in URL)
