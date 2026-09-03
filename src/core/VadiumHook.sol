@@ -291,9 +291,16 @@ contract VadiumHook is IHooks, SafeCallback {
     ///         without running the constructor (the local test harness does exactly
     ///         this). In that case the owner slot is still zero and `initializeOwner`
     ///         seeds it once.
+    ///
+    ///         To close the open-grab window, seeding is refused once the hook has
+    ///         begun operating (any role assigned, any slash into the reserve). A real
+    ///         deployment must therefore seed the owner in the same transaction that
+    ///         places the hook; leave that hop unseeded at your own risk.
     function initializeOwner(address _owner) external {
         if (_owner == ZERO) revert("Vadium: zero owner");
         if (owner != ZERO) revert AlreadySet();
+        if (watchtower != ZERO || keeper != ZERO) revert AlreadySet();
+        if (insurance.slashedPledged != 0 || insurance.withdrawn != 0) revert AlreadySet();
         owner = _owner;
     }
 
@@ -331,6 +338,10 @@ contract VadiumHook is IHooks, SafeCallback {
         onlyWatchtower
     {
         if (searcher == ZERO) revert("Vadium: zero searcher");
+        if (banUntil <= block.number) revert("Vadium: flag already expired");
+        if (flaggedUntil[searcher] != 0 && flaggedUntil[searcher] >= block.number) {
+            revert("Vadium: re-flag before expiry");
+        }
         flaggedUntil[searcher] = banUntil;
 
         BondManager.Bond storage b = bonds[searcher];
@@ -341,6 +352,20 @@ contract VadiumHook is IHooks, SafeCallback {
                 b.amount -= toSlash;
                 slashed = toSlash;
                 insurance.credit(toSlash);
+
+                // A watchtower slash plays by the same two-tier rules as the on-pool
+                // detector: a repeat while still inside the extended lock escalates to
+                // a full ban, otherwise it records a strike and extends the lock. This
+                // closes the gap where repeated watchtower flags could bleed a live
+                // bond to zero with no lock and no ban.
+                bool isRepeat = b.strikeCount > 0
+                    && b.isWithinExtendedLock(FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS, block.number);
+                if (isRepeat) {
+                    b.bannedUntil = block.number + REPEAT_OFFENSE_BAN_BLOCKS;
+                } else {
+                    b.depositBlock = block.number;
+                    b.strikeCount++;
+                }
             }
         }
 
@@ -363,7 +388,8 @@ contract VadiumHook is IHooks, SafeCallback {
     {
         if (searchers.length == 0) revert NotFlagged();
         for (uint256 i = 0; i < searchers.length; i++) {
-            if (flaggedUntil[searchers[i]] == 0) revert NotFlagged();
+            // Only an active (unexpired) flag justifies a payout.
+            if (flaggedUntil[searchers[i]] <= block.number) revert NotFlagged();
         }
         return _payout(insurance.reserve);
     }
@@ -519,7 +545,7 @@ contract VadiumHook is IHooks, SafeCallback {
         uint24 overrideFee = 0;
 
         BondManager.Bond storage b = bonds[sender];
-        if (b.amount > 0 && b.bannedUntil <= block.number) {
+        if (b.amount > 0 && b.bannedUntil <= block.number && flaggedUntil[sender] <= block.number) {
             // Discount is applied to the pool's static fee.
             uint24 discounted = FeeDiscount.discountedFee(fee, DEFAULT_FEE_DISCOUNT_BPS);
             // The override is only honored if the override flag is set.
@@ -587,9 +613,15 @@ contract VadiumHook is IHooks, SafeCallback {
 
         if (b.amount == 0) revert NoBond();
         if (b.bannedUntil > block.number) revert Banned(b.bannedUntil);
-        if (!b.isMatured(DEFAULT_MIN_BOND_DURATION_BLOCKS, block.number)) {
-            revert BondNotMatured(block.number, b.depositBlock + DEFAULT_MIN_BOND_DURATION_BLOCKS);
-        }
+
+        // A first offense stretches the minimum-duration lock to the extended window
+        // (default 7,200 blocks), so a struck searcher cannot instantly re-discharge
+        // the residual bond and walk away from the scheme.
+        uint256 maturity = b.depositBlock
+            + (b.strikeCount > 0
+                    ? FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS
+                    : DEFAULT_MIN_BOND_DURATION_BLOCKS);
+        if (block.number < maturity) revert BondNotMatured(block.number, maturity);
 
         uint256 amount = b.amount;
         b.amount = 0;

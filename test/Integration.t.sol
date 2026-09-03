@@ -550,6 +550,49 @@ contract VadiumIntegrationTest is Test {
     }
 
     // -------------------------------------------------------------------------
+    // Test: reserve invariant holds across partial drain + bond withdrawal
+    // -------------------------------------------------------------------------
+
+    function test_partialDrain_afterWithdrawal_preservesSolvency() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        hook.setKeeper(makeAddr("kee"));
+        _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
+
+        // Build a 50e6 reserve via a real sandwich; bond falls to 50e6.
+        _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
+        _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
+        _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+        assertEq(hook.bondedBalance(address(searcherRouter)), BOND_AMOUNT / 2);
+
+        // The searcher's remaining bond and the reserve are both still physically held.
+        uint256 escrowBefore = token1.balanceOf(address(hook));
+        assertEq(escrowBefore, BOND_AMOUNT, "escrow equals bond + reserve");
+
+        // Searcher matures and withdraws their remaining bond. A struck bond is gated
+        // on the extended first-offense lock, not the 100-block minimum.
+        vm.roll(block.number + hook.FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS());
+        vm.prank(address(searcherRouter));
+        hook.withdrawBond();
+        assertEq(hook.bondedBalance(address(searcherRouter)), 0);
+        // Escrow now only backs the reserve.
+        assertEq(token1.balanceOf(address(hook)), BOND_AMOUNT / 2, "escrow = reserve only");
+
+        // Flag so the keeper drain is justified, then drain the reserve against a
+        // solvent hook.
+        vm.prank(watch);
+        hook.flagFromWatchtower(address(searcherRouter), 0, block.number + 100);
+        address[] memory flagged = new address[](1);
+        flagged[0] = address(searcherRouter);
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged);
+        assertEq(drained, BOND_AMOUNT / 2, "drain moves the full reserve");
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(token1.balanceOf(address(hook)), 0, "hook escrow fully discharged");
+    }
+
+    // -------------------------------------------------------------------------
     // Gas benchmark — hook per-operation costs
     // -------------------------------------------------------------------------
     // The hook is etch-deployed at its permission-derived address, so foundry does

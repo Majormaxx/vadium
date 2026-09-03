@@ -567,7 +567,7 @@ contract VadiumHookTest is Test {
 
         // Request more than the full bond; the slash is capped at the bond balance.
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, type(uint256).max, block.number);
+        hook.flagFromWatchtower(searcher, type(uint256).max, block.number + 10);
         assertEq(hook.bondedBalance(searcher), 0);
         assertEq(hook.insuranceReserve(), BOND_AMOUNT);
     }
@@ -710,6 +710,166 @@ contract VadiumHookTest is Test {
         assertEq(hook.insuranceReserve(), BOND_AMOUNT);
         assertEq(hook.slashedPledged(), BOND_AMOUNT);
         assertTrue(hook.isBanned(searcher));
+    }
+
+    // -------------------------------------------------------------------------
+    // Adversarial edge cases
+    // -------------------------------------------------------------------------
+
+    function test_initializeOwner_revertsWhenAlreadySet() public {
+        // On a normal deployment the constructor sets owner, so the permissionless
+        // bootstrap path is inert: it can never be grabbed once ownership exists.
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.initializeOwner(searcher);
+    }
+
+    function test_watchtowerSlashes_escalateLikeOnPool() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First watchtower flag slashes half the bond, records a strike, and extends
+        // the lock — but does not yet ban.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 3);
+        (uint256 amt,, uint256 bannedUntil, uint256 strikes) = hook.bonds(searcher);
+        assertEq(amt, BOND_AMOUNT / 2);
+        assertEq(bannedUntil, 0, "first watchtower flag has not banned");
+        assertEq(strikes, 1, "first watchtower flag counts a strike");
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // A repeat flag is refused while the prior flag is still live.
+        vm.prank(watch);
+        vm.expectRevert();
+        hook.flagFromWatchtower(searcher, 0, block.number + 1_000);
+
+        // Once the first (short) flag expires but we are still inside the extended
+        // lock, a second watchtower slash escalates to a full ban and drains the
+        // residual bond.
+        vm.roll(block.number + 4);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, type(uint256).max, block.number + 3);
+        assertEq(hook.bondedBalance(searcher), 0);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT);
+        assertTrue(hook.isBanned(searcher), "repeat watchtower slash draws the ban");
+    }
+
+    function test_withdrawLock_firstOffenseExtendsTo7200Blocks() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First offense at block 1000 slashes 50% and records a strike.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.bondedBalance(searcher), BOND_AMOUNT / 2);
+
+        // Withdrawal is gated on the extended first-offense lock (7,200 blocks), not
+        // the 100-block minimum, so the residual bond cannot be discharged instantly.
+        uint256 ext = hook.FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS();
+        uint256 depositBlock = block.number;
+
+        vm.roll(depositBlock + 100);
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.withdrawBond();
+
+        vm.roll(depositBlock + ext - 1);
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.withdrawBond();
+
+        vm.roll(depositBlock + ext);
+        vm.prank(searcher);
+        hook.withdrawBond();
+        assertEq(hook.bondedBalance(searcher), 0);
+    }
+
+    function test_drainFlagged_rejectsExpiredFlag() public {
+        // drainFlagged only pays out while a listed address holds an active flag; an
+        // expired flag no longer justifies a payout.
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        hook.setKeeper(makeAddr("kee"));
+
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // Still active: keeper drains.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 3);
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged);
+        assertEq(drained, BOND_AMOUNT / 2, "active flag drains the reserve");
+        assertEq(hook.insuranceReserve(), 0);
+
+        // A fresh offense into a second bond, flagged with a short expiry: once the
+        // flag lapses, the same drain is rejected.
+        address searcher2 = makeAddr("searcher2");
+        address victim2 = makeAddr("victim2");
+        vm.startPrank(searcher2);
+        token1.mint(searcher2, 10_000e6);
+        token1.approve(address(hook), type(uint256).max);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+        vm.roll(2000);
+        hook.recordSwap(searcher2, true);
+        hook.recordSwap(victim2, false);
+        hook.recordSwap(searcher2, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher2, 0, block.number + 3);
+        vm.roll(block.number + 5);
+        address[] memory flagged2 = new address[](1);
+        flagged2[0] = searcher2;
+        vm.prank(hook.keeper());
+        vm.expectRevert();
+        hook.drainFlagged(flagged2);
+    }
+
+    function test_beforeSwap_flagStripsDiscount() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // Confirm the discount is active before any flag.
+        IPoolManager.SwapParams memory params =
+            IPoolManager.SwapParams({ amountSpecified: 0, zeroForOne: true, sqrtPriceLimitX96: 0 });
+        vm.prank(pmAddr);
+        (,, uint24 pre) = hook.beforeSwap(searcher, poolKey, params, "");
+        assertTrue(pre != 0, "bonded address has a discount");
+
+        // A live watchtower flag strips the discount even though the address is not
+        // banned.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        vm.prank(pmAddr);
+        (,, uint24 post) = hook.beforeSwap(searcher, poolKey, params, "");
+        assertTrue(post == 0, "flagged address loses the discount");
+
+        // Once the flag expires, the discount returns.
+        vm.roll(block.number + 11);
+        vm.prank(pmAddr);
+        (,, uint24 postExpiry) = hook.beforeSwap(searcher, poolKey, params, "");
+        assertTrue(postExpiry != 0, "discount returns after the flag expires");
     }
 
     // -------------------------------------------------------------------------
