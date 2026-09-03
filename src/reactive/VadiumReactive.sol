@@ -91,7 +91,7 @@ contract VadiumReactive is AbstractReactive {
         address _callbackTarget,
         uint64 _callbackGasLimit,
         address _owner
-    ) AbstractReactive() {
+    ) payable AbstractReactive() {
         if (_originContract == address(0)) revert("Vadium: zero origin");
         if (_callbackTarget == address(0)) revert("Vadium: zero callback target");
         if (_owner == address(0)) revert("Vadium: zero owner");

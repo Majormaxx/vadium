@@ -47,7 +47,7 @@ contract DeployVadiumReactive is Script {
 
         vm.startBroadcast(deployerKey);
 
-        VadiumReactive rc = new VadiumReactive(
+        VadiumReactive rc = new VadiumReactive{value: 2 ether}(
             ORIGIN_CHAIN_ID,
             hookAddress,
             hookAddress,
