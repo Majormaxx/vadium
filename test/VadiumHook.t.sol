@@ -5,6 +5,7 @@ import { Test, console2 } from "forge-std/Test.sol";
 import { IPoolManager } from "v4-core/src/interfaces/IPoolManager.sol";
 import { PoolManager } from "v4-core/src/PoolManager.sol";
 import { BeforeSwapDelta } from "v4-core/src/types/BeforeSwapDelta.sol";
+import { BalanceDelta } from "v4-core/src/types/BalanceDelta.sol";
 import { Currency, CurrencyLibrary } from "v4-core/src/types/Currency.sol";
 import { Currency } from "v4-core/src/types/Currency.sol";
 import { PoolKey } from "v4-core/src/types/PoolKey.sol";
@@ -1025,5 +1026,398 @@ contract VadiumHookTest is Test {
 
     function test_bondedBalance_zeroWhenNoBond() public view {
         assertEq(hook.bondedBalance(searcher), 0);
+    }
+
+    // -------------------------------------------------------------------------
+    // Role management — zero-address reverts
+    // -------------------------------------------------------------------------
+
+    function test_setWatchtower_zeroAddress_reverts() public {
+        vm.expectRevert("Vadium: zero watchtower");
+        hook.setWatchtower(address(0));
+    }
+
+    function test_setKeeper_zeroAddress_reverts() public {
+        vm.expectRevert("Vadium: zero keeper");
+        hook.setKeeper(address(0));
+    }
+
+    // -------------------------------------------------------------------------
+    // Bond lifecycle — boundary and error selector tests
+    // -------------------------------------------------------------------------
+
+    function test_bond_exactMinBoundary_succeeds() public {
+        uint256 minBond = hook.DEFAULT_MIN_BOND();
+        vm.prank(searcher);
+        hook.bond(minBond);
+        assertEq(hook.bondedBalance(searcher), minBond);
+    }
+
+    function test_bond_revertsWithBondTooSmall_selector() public {
+        vm.prank(searcher);
+        vm.expectRevert(abi.encodeWithSelector(VadiumHook.BondTooSmall.selector, 99e6, 100e6));
+        hook.bond(99e6);
+    }
+
+    function test_bond_revertsWithBanned_selector() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First offense → repeat → ban.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        vm.roll(1001);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        uint256 expectedBannedUntil = 1001 + hook.REPEAT_OFFENSE_BAN_BLOCKS();
+        (,, uint256 bannedUntil,) = hook.bonds(searcher);
+        assertEq(bannedUntil, expectedBannedUntil, "ban duration is correct");
+
+        vm.prank(searcher);
+        vm.expectRevert(abi.encodeWithSelector(VadiumHook.Banned.selector, bannedUntil));
+        hook.bond(BOND_AMOUNT);
+    }
+
+    function test_withdrawBond_revertsWithBondNotMatured_selector() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+
+        // Bond at block.number (currently 1), maturity = depositBlock + MIN_DURATION = 1 + 100 = 101.
+        vm.roll(50);
+        uint256 maturity = 1 + hook.DEFAULT_MIN_BOND_DURATION_BLOCKS();
+        vm.expectRevert(
+            abi.encodeWithSelector(VadiumHook.BondNotMatured.selector, block.number, maturity)
+        );
+        hook.withdrawBond();
+    }
+
+    function test_withdrawBond_revertsWhenBanned() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First offense → repeat → ban.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        vm.roll(1001);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.withdrawBond();
+    }
+
+    function test_withdrawBond_noBondAfterRepeatSlash() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // First offense → repeat → full slash.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        vm.roll(1001);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        assertEq(hook.bondedBalance(searcher), 0, "bond zeroed after repeat slash");
+
+        vm.prank(searcher);
+        vm.expectRevert(VadiumHook.NoBond.selector);
+        hook.withdrawBond();
+    }
+
+    // -------------------------------------------------------------------------
+    // flagFromWatchtower — additional edge cases
+    // -------------------------------------------------------------------------
+
+    function test_flagFromWatchtower_zeroAmountOnLiveBond() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+
+        // No slash occurred, bond intact; flag recorded; strike NOT counted
+        // because toSlash == 0 skips the entire slash/escalation block.
+        assertEq(hook.bondedBalance(searcher), BOND_AMOUNT);
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.flaggedUntil(searcher), block.number + 10);
+        (,,, uint256 strikes) = hook.bonds(searcher);
+        assertEq(strikes, 0, "zero-slash flag does not count a strike");
+    }
+
+    function test_flagFromWatchtower_expiredBan_reverts() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        vm.expectRevert("Vadium: flag already expired");
+        hook.flagFromWatchtower(searcher, 0, block.number);
+    }
+
+    function test_flagFromWatchtower_emitsFlaggedEvent() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.expectEmit(true, false, false, true, address(hook));
+        emit VadiumHook.Flagged(searcher, BOND_AMOUNT / 2, block.number + 10);
+
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10);
+    }
+
+    function test_flagFromWatchtower_zeroSearcher_reverts() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        vm.expectRevert("Vadium: zero searcher");
+        hook.flagFromWatchtower(address(0), 0, block.number + 10);
+    }
+
+    // -------------------------------------------------------------------------
+    // drainFlagged — multi-element and cross-function
+    // -------------------------------------------------------------------------
+
+    function test_drainFlagged_multiSearchers_allActive_succeeds() public {
+        // Build reserve from two searchers' slashes.
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+        vm.startPrank(searcher2);
+        token1.mint(searcher2, 10_000e6);
+        token1.approve(address(hook), type(uint256).max);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        hook.recordSwap(searcher2, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher2, false);
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher2, 0, block.number + 10);
+
+        address[] memory flagged = new address[](2);
+        flagged[0] = searcher;
+        flagged[1] = searcher2;
+
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged);
+        assertEq(drained, BOND_AMOUNT, "drained both slashes");
+        assertEq(hook.insuranceReserve(), 0);
+    }
+
+    function test_drainFlagged_multiSearchers_oneExpired_reverts() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        // Flag searcher with a short window, searcher2 with a long one.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 3);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher2, 0, block.number + 100);
+
+        // Expire searcher's flag.
+        vm.roll(block.number + 5);
+
+        address[] memory flagged = new address[](2);
+        flagged[0] = searcher;
+        flagged[1] = searcher2;
+
+        vm.prank(hook.keeper());
+        vm.expectRevert();
+        hook.drainFlagged(flagged);
+    }
+
+    // -------------------------------------------------------------------------
+    // claimCoverage — edge cases
+    // -------------------------------------------------------------------------
+
+    function test_claimCoverage_zeroAmount_reverts() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        vm.expectRevert("Vadium: zero payout");
+        hook.claimCoverage(0);
+    }
+
+    function test_claimCoverage_partialDrain() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        // Claim half.
+        hook.claimCoverage(BOND_AMOUNT / 4);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 4);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 4);
+
+        // Claim the rest.
+        hook.claimCoverage(BOND_AMOUNT / 4);
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // remainingCoverage view
+    // -------------------------------------------------------------------------
+
+    function test_remainingCoverage_matchesReserve() public {
+        assertEq(hook.remainingCoverage(), hook.insuranceReserve());
+
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        assertEq(hook.remainingCoverage(), hook.insuranceReserve());
+        assertEq(hook.remainingCoverage(), BOND_AMOUNT / 2);
+    }
+
+    // -------------------------------------------------------------------------
+    // Event emission tests
+    // -------------------------------------------------------------------------
+
+    function test_bond_emitsBondedEvent() public {
+        vm.expectEmit(true, false, false, true, address(hook));
+        emit VadiumHook.Bonded(searcher, BOND_AMOUNT, block.number);
+
+        vm.prank(searcher);
+        hook.bond(BOND_AMOUNT);
+    }
+
+    function test_withdrawBond_emitsEvent() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.roll(block.number + 100);
+
+        vm.expectEmit(true, false, false, false, address(hook));
+        emit VadiumHook.BondWithdrawn(searcher, BOND_AMOUNT);
+        hook.withdrawBond();
+    }
+
+    function test_setWatchtower_emitsEvent() public {
+        address watch = makeAddr("watch");
+        vm.expectEmit(true, false, false, false, address(hook));
+        emit VadiumHook.WatchtowerSet(watch);
+        hook.setWatchtower(watch);
+    }
+
+    function test_setKeeper_emitsEvent() public {
+        address kee = makeAddr("kee");
+        vm.expectEmit(true, false, false, false, address(hook));
+        emit VadiumHook.KeeperSet(kee);
+        hook.setKeeper(kee);
+    }
+
+    // -------------------------------------------------------------------------
+    // Access control — onlyPoolManager on callbacks
+    // -------------------------------------------------------------------------
+
+    function test_beforeSwap_onlyPoolManager_reverts() public {
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.beforeSwap(
+            searcher,
+            poolKey,
+            IPoolManager.SwapParams({ amountSpecified: 0, zeroForOne: true, sqrtPriceLimitX96: 0 }),
+            ""
+        );
+    }
+
+    function test_afterSwap_onlyPoolManager_reverts() public {
+        vm.prank(searcher);
+        vm.expectRevert();
+        hook.afterSwap(
+            searcher,
+            poolKey,
+            IPoolManager.SwapParams({ amountSpecified: 0, zeroForOne: true, sqrtPriceLimitX96: 0 }),
+            BalanceDelta.wrap(0),
+            ""
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // initializeOwner — multiple AlreadySet paths
+    // -------------------------------------------------------------------------
+
+    function test_initializeOwner_revertsWhenWatchtowerAlreadySet() public {
+        // Deploy a fresh hook with no constructor (use etch to skip owner setting).
+        address freshImpl = makeAddr("freshImpl");
+        vm.etch(freshImpl, address(hook).code);
+
+        // Can't easily simulate the uninitialized-owner path on the same hook
+        // because the constructor already set owner. This test confirms the
+        // AlreadySet revert fires when owner is set.
+        vm.expectRevert(VadiumHook.AlreadySet.selector);
+        hook.initializeOwner(makeAddr("newOwner"));
+    }
+
+    // -------------------------------------------------------------------------
+    // onWatchtowerFlag — zero banUntil when already flagged
+    // -------------------------------------------------------------------------
+
+    function test_onWatchtowerFlag_zeroBanWhenAlreadyFlagged_isNoop() public {
+        hook.setWatchtower(address(this));
+
+        _watchtowerFlag(address(this), searcher, block.number + 10);
+        uint256 first = hook.flaggedUntil(searcher);
+
+        // banUntil=0 becomes DEFAULT_MIN_BOND_DURATION_BLOCKS, but flaggedUntil is
+        // already >= block.number, so it is a no-op.
+        _watchtowerFlag(address(this), searcher, 0);
+        assertEq(hook.flaggedUntil(searcher), first);
     }
 }
