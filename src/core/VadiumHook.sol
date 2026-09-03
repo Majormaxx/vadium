@@ -242,11 +242,13 @@ contract VadiumHook is IHooks, SafeCallback {
         Currency _currency0,
         Currency _currency1,
         uint24 _fee,
-        int24 _tickSpacing
+        int24 _tickSpacing,
+        address _owner
     ) SafeCallback(_poolManager) {
         // A static fee is required and must be within v4's ceiling. An exact
         // DYNAMIC_FEE_FLAG (0x800000) value exceeds MAX_LP_FEE, so it is excluded.
         if (!_fee.isValid()) revert("Vadium: pool fee out of range");
+        if (_owner == ZERO) revert("Vadium: zero owner");
 
         fee = _fee;
         tickSpacing = _tickSpacing;
@@ -257,9 +259,11 @@ contract VadiumHook is IHooks, SafeCallback {
         // The bond is ERC-20 token1, so the zero address (native token) is invalid.
         if (address(bondToken) == ZERO) revert("Vadium: bond token cannot be zero address");
 
-        // The deployer is the owner. Watchtower and keeper are assigned later, once,
-        // by the owner.
-        owner = msg.sender;
+        // A foundry CREATE2 broadcast deploys through its factory, so `msg.sender`
+        // is the factory, not the deployer. The owner is therefore passed explicitly
+        // (the broadcast sender) rather than read from msg.sender. Watchtower and
+        // keeper are assigned later, once, by the owner.
+        owner = _owner;
     }
 
     // -------------------------------------------------------------------------

@@ -79,7 +79,8 @@ contract DeployVadium is Script {
                 Currency.wrap(address(0)), // native ETH — token0
                 Currency.wrap(USDC), // token1 — the bond token
                 POOL_FEE,
-                10
+                10,
+                deployer // owner — must be the EOA, not the CREATE2 factory
             )
         );
 
@@ -103,10 +104,12 @@ contract DeployVadium is Script {
             Currency.wrap(address(0)),
             Currency.wrap(USDC),
             POOL_FEE,
-            10
+            10,
+            deployer // owner — the EOA, not the CREATE2 factory
         );
         require(address(hook) == hookAddress, "Hook address mismatch - re-mine salt");
         console2.log("VadiumHook:   ", address(hook));
+        console2.log("Owner:        ", hook.owner());
 
         // ── 3. Initialize the pool ────────────────────────────────────────────
         PoolKey memory poolKey = PoolKey({

@@ -58,6 +58,9 @@ remappings = [
 unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC}"
 unichain = "${UNICHAIN_RPC}"
 
+[etherscan]
+unichain-sepolia = { key = "${UNISCAN_API_KEY}", chain = 1301, url = "https://api.uniscan.xyz/api" }
+
 [fuzz]
 runs = 1000
 seed = "0x1"

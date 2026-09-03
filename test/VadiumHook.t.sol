@@ -79,7 +79,8 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token0)),
             Currency.wrap(address(token1)),
             POOL_FEE,
-            TICK_SPACING
+            TICK_SPACING,
+            address(this)
         );
 
         poolKey = PoolKey({
@@ -116,7 +117,8 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token0)),
             Currency.wrap(address(0)), // token1 = zero → invalid bond token
             POOL_FEE,
-            TICK_SPACING
+            TICK_SPACING,
+            address(this)
         );
     }
 
@@ -127,8 +129,25 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token0)),
             Currency.wrap(address(token1)),
             1_000_001, // above MAX_LP_FEE
-            TICK_SPACING
+            TICK_SPACING,
+            address(this)
         );
+    }
+
+    function test_constructor_revertsOnZeroOwner() public {
+        vm.expectRevert("Vadium: zero owner");
+        new TestVadiumHook(
+            IPoolManager(pmAddr),
+            Currency.wrap(address(token0)),
+            Currency.wrap(address(token1)),
+            POOL_FEE,
+            TICK_SPACING,
+            address(0)
+        );
+    }
+
+    function test_constructor_setsExplicitOwner() public view {
+        assertEq(hook.owner(), address(this), "owner is the explicit constructor arg");
     }
 
     // -------------------------------------------------------------------------

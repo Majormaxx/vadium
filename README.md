@@ -3,7 +3,7 @@
 [![Solidity](https://img.shields.io/badge/solidity-0.8.26-blue)](https://soliditylang.org)
 [![Foundry](https://img.shields.io/badge/built%20with-Foundry-ff69b4)](https://book.getfoundry.sh)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-94%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
+[![Tests](https://img.shields.io/badge/tests-96%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
 [![Unichain Sepolia](https://img.shields.io/badge/chain-Unichain%20Sepolia-lightgrey)](https://sepolia.uniscan.xyz)
 
 A Uniswap v4 hook that makes sandwich attacks unprofitable instead of just detected. The cost of attacking is staked upfront: a searcher posts a bond in the pool's fee token to earn a lower swap fee, and when their own flow reads as a sandwich, that bond is slashed and held in an LP insurance reserve. No oracle, no swap, no off-chain watcher to run the core pool.
@@ -228,7 +228,7 @@ src/core/
     ├── InsurancePolicy.sol       # LP insurance reserve accounting
     └── SandwichDetector.sol      # Same-block sandwich match logic
 app/script/Deploy.s.sol           # CREATE2 salt mining + pool init
-test/                             # 94 tests (unit + integration + gas)
+test/                             # 96 tests (unit + integration + gas)
 ```
 
 ## Test
@@ -237,7 +237,7 @@ test/                             # 94 tests (unit + integration + gas)
 forge test
 ```
 
-94 tests across 5 suites, all green under the `fast` profile, `forge fmt --check` clean.
+96 tests across 5 suites, all green under the `fast` profile, `forge fmt --check` clean.
 
 | Suite | Area |
 |---|---|

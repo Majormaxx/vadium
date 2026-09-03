@@ -195,7 +195,8 @@ contract VadiumIntegrationTest is Test {
         //    beforeSwap (bit 7) + afterSwap (bit 6) = 0x00C0
         uint160 hookFlags = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG;
         address hookAddr = address(uint160(hookFlags));
-        VadiumHook hookImpl = new VadiumHook(pm, currency0, currency1, POOL_FEE, TICK_SPACING);
+        VadiumHook hookImpl =
+            new VadiumHook(pm, currency0, currency1, POOL_FEE, TICK_SPACING, address(this));
         vm.etch(hookAddr, address(hookImpl).code);
         hook = VadiumHook(hookAddr);
 
