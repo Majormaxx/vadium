@@ -48,6 +48,7 @@ contract VadiumHookTest is Test {
     PoolKey internal poolKey;
     uint24 constant POOL_FEE = 3000;
     int24 constant TICK_SPACING = 10;
+    address constant CALLBACK_PROXY = 0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4;
 
     uint256 constant BOND_AMOUNT = 100e6;
 
@@ -80,7 +81,8 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token1)),
             POOL_FEE,
             TICK_SPACING,
-            address(this)
+            address(this),
+            CALLBACK_PROXY
         );
 
         poolKey = PoolKey({
@@ -118,7 +120,8 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(0)), // token1 = zero → invalid bond token
             POOL_FEE,
             TICK_SPACING,
-            address(this)
+            address(this),
+            CALLBACK_PROXY
         );
     }
 
@@ -130,7 +133,8 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token1)),
             1_000_001, // above MAX_LP_FEE
             TICK_SPACING,
-            address(this)
+            address(this),
+            CALLBACK_PROXY
         );
     }
 
@@ -142,6 +146,20 @@ contract VadiumHookTest is Test {
             Currency.wrap(address(token1)),
             POOL_FEE,
             TICK_SPACING,
+            address(0),
+            CALLBACK_PROXY
+        );
+    }
+
+    function test_constructor_revertsOnZeroCallbackProxy() public {
+        vm.expectRevert("Vadium: zero callback proxy");
+        new TestVadiumHook(
+            IPoolManager(pmAddr),
+            Currency.wrap(address(token0)),
+            Currency.wrap(address(token1)),
+            POOL_FEE,
+            TICK_SPACING,
+            address(this),
             address(0)
         );
     }
@@ -601,6 +619,99 @@ contract VadiumHookTest is Test {
         // No bond to slash, but the flag is recorded for a later keeper drain.
         assertEq(hook.insuranceReserve(), 0);
         assertEq(hook.flaggedUntil(searcher), block.number + 20);
+    }
+
+    // -------------------------------------------------------------------------
+    // onWatchtowerFlag (Reactive Network cross-chain flag)
+    // -------------------------------------------------------------------------
+
+    /// @dev Helper: deliver a cross-chain flag from the callback proxy.
+    function _watchtowerFlag(address rvmId, address target, uint256 banUntil) internal {
+        vm.prank(CALLBACK_PROXY);
+        hook.onWatchtowerFlag(rvmId, target, banUntil);
+    }
+
+    function test_onWatchtowerFlag_onlyCallbackProxy() public {
+        // First-but-wrong caller: anyone (including the watchtower role itself) must
+        // fail unless the message originates from the chain's callback proxy.
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        vm.prank(watch);
+        vm.expectRevert();
+        hook.onWatchtowerFlag(watch, searcher, block.number + 10);
+    }
+
+    function test_onWatchtowerFlag_requiresMatchingRvmId() public {
+        // Proxy is authoritative as the transport, but the injected RVM ID must still
+        // match the assigned watchtower.
+        hook.setWatchtower(makeAddr("watch"));
+        vm.prank(CALLBACK_PROXY);
+        vm.expectRevert();
+        hook.onWatchtowerFlag(makeAddr("imposter"), searcher, block.number + 10);
+    }
+
+    function test_onWatchtowerFlag_zeroSearcher_reverts() public {
+        hook.setWatchtower(address(this));
+        vm.prank(CALLBACK_PROXY);
+        vm.expectRevert("Vadium: zero searcher");
+        hook.onWatchtowerFlag(address(this), address(0), block.number + 10);
+    }
+
+    function test_onWatchtowerFlag_setsFlagOnly() public {
+        // The cross-chain path records the flag for a later keeper drain; it does not
+        // slash (bond confiscation is the on-pool detector's job and would run here too,
+        // but the two messenger flows stay coupled only through the flag record).
+        hook.setWatchtower(address(this));
+
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        _watchtowerFlag(address(this), searcher, block.number + 10);
+
+        assertEq(hook.flaggedUntil(searcher), block.number + 10);
+        // No on-pool slash happened here: the bond stays whole and the reserve intact.
+        assertEq(hook.bondedBalance(searcher), BOND_AMOUNT);
+        assertEq(hook.insuranceReserve(), 0);
+    }
+
+    function test_onWatchtowerFlag_expiredBan_reverts() public {
+        hook.setWatchtower(address(this));
+        vm.prank(CALLBACK_PROXY);
+        vm.expectRevert("Vadium: flag already expired");
+        hook.onWatchtowerFlag(address(this), searcher, block.number);
+    }
+
+    function test_onWatchtowerFlag_activeFlag_isNoop() public {
+        hook.setWatchtower(address(this));
+
+        _watchtowerFlag(address(this), searcher, block.number + 10);
+        uint256 first = hook.flaggedUntil(searcher);
+
+        // A second flag while the first is still active must not silently extend the
+        // window — it is a no-op, not a re-flag race.
+        _watchtowerFlag(address(this), searcher, block.number + 20);
+        assertEq(hook.flaggedUntil(searcher), first);
+    }
+
+    function test_onWatchtowerFlag_zeroBanUntil_defaults() public {
+        hook.setWatchtower(address(this));
+        // Detector recorded no ban window: fall back to the minimum bond duration.
+        _watchtowerFlag(address(this), searcher, 0);
+        assertEq(
+            hook.flaggedUntil(searcher), block.number + hook.DEFAULT_MIN_BOND_DURATION_BLOCKS()
+        );
+    }
+
+    function test_onWatchtowerFlag_usedWhenExpired() public {
+        hook.setWatchtower(address(this));
+
+        // Once an existing flag passes, a fresh flag may take effect again.
+        _watchtowerFlag(address(this), searcher, block.number + 5);
+        vm.roll(block.number + 10); // old flag now expired
+
+        _watchtowerFlag(address(this), searcher, block.number + 10);
+        assertEq(hook.flaggedUntil(searcher), block.number + 10);
     }
 
     function test_claimCoverage_onlyOwner() public {

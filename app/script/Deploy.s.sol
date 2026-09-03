@@ -39,6 +39,8 @@ contract DeployVadium is Script {
     address constant POOL_MANAGER = 0x00B036B58a818B1BC34d502D3fE730Db729e62AC;
     // USDC — the pool's token1 and the bond denomination
     address constant USDC = 0x31d0220469e10c4E71834a79b1f276d740d3768F;
+    // Reactive Network Callback Proxy (Unichain Sepolia, chain ID 1301)
+    address constant CALLBACK_PROXY = 0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4;
 
     // Initial pool sqrtPrice: tick 0 = 1:1
     uint160 constant INITIAL_SQRT_PRICE = 79228162514264337593543950336;
@@ -80,7 +82,8 @@ contract DeployVadium is Script {
                 Currency.wrap(USDC), // token1 — the bond token
                 POOL_FEE,
                 10,
-                deployer // owner — must be the EOA, not the CREATE2 factory
+                deployer, // owner — must be the EOA, not the CREATE2 factory
+                CALLBACK_PROXY // Reactive Callback Proxy on Unichain Sepolia
             )
         );
 
@@ -105,7 +108,8 @@ contract DeployVadium is Script {
             Currency.wrap(USDC),
             POOL_FEE,
             10,
-            deployer // owner — the EOA, not the CREATE2 factory
+            deployer, // owner — the EOA, not the CREATE2 factory
+            CALLBACK_PROXY // Reactive Callback Proxy on Unichain Sepolia
         );
         require(address(hook) == hookAddress, "Hook address mismatch - re-mine salt");
         console2.log("VadiumHook:   ", address(hook));

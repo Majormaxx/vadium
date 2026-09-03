@@ -159,6 +159,7 @@ contract VadiumIntegrationTest is Test {
     // --- Constants ---
     uint24 constant POOL_FEE = 3000;
     int24 constant TICK_SPACING = 10;
+    address constant CALLBACK_PROXY = 0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4;
     uint256 constant BOND_AMOUNT = 100e6;
     uint256 constant SWAP_AMOUNT = 1000e6;
     uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
@@ -195,8 +196,9 @@ contract VadiumIntegrationTest is Test {
         //    beforeSwap (bit 7) + afterSwap (bit 6) = 0x00C0
         uint160 hookFlags = Hooks.BEFORE_SWAP_FLAG | Hooks.AFTER_SWAP_FLAG;
         address hookAddr = address(uint160(hookFlags));
-        VadiumHook hookImpl =
-            new VadiumHook(pm, currency0, currency1, POOL_FEE, TICK_SPACING, address(this));
+        VadiumHook hookImpl = new VadiumHook(
+            pm, currency0, currency1, POOL_FEE, TICK_SPACING, address(this), CALLBACK_PROXY
+        );
         vm.etch(hookAddr, address(hookImpl).code);
         hook = VadiumHook(hookAddr);
 

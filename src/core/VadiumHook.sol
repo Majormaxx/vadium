@@ -120,6 +120,11 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @notice The pool's token1 — the bond denomination and the target for slashes.
     IERC20 public immutable bondToken;
 
+    /// @notice Reactive Network's Callback Proxy on the pool's chain (Unichain Sepolia:
+    ///         `0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4`). The only transport that may
+    ///         deliver a watchtower flag cross-chain. Locked at construction.
+    address public immutable callbackProxy;
+
     // -------------------------------------------------------------------------
     // Mutable state
     // -------------------------------------------------------------------------
@@ -243,18 +248,21 @@ contract VadiumHook is IHooks, SafeCallback {
         Currency _currency1,
         uint24 _fee,
         int24 _tickSpacing,
-        address _owner
+        address _owner,
+        address _callbackProxy
     ) SafeCallback(_poolManager) {
         // A static fee is required and must be within v4's ceiling. An exact
         // DYNAMIC_FEE_FLAG (0x800000) value exceeds MAX_LP_FEE, so it is excluded.
         if (!_fee.isValid()) revert("Vadium: pool fee out of range");
         if (_owner == ZERO) revert("Vadium: zero owner");
+        if (_callbackProxy == ZERO) revert("Vadium: zero callback proxy");
 
         fee = _fee;
         tickSpacing = _tickSpacing;
         currency0 = _currency0;
         currency1 = _currency1;
         bondToken = IERC20(Currency.unwrap(_currency1));
+        callbackProxy = _callbackProxy;
 
         // The bond is ERC-20 token1, so the zero address (native token) is invalid.
         if (address(bondToken) == ZERO) revert("Vadium: bond token cannot be zero address");
@@ -282,6 +290,13 @@ contract VadiumHook is IHooks, SafeCallback {
 
     modifier onlyKeeper() {
         if (msg.sender != keeper) revert Unauthorized();
+        _;
+    }
+
+    /// @notice Gates cross-chain watchtower flags delivered by Reactive Network. Only the
+    ///         chain's dedicated Callback Proxy may invoke these functions.
+    modifier onlyCallbackProxy() {
+        if (msg.sender != callbackProxy) revert Unauthorized();
         _;
     }
 
@@ -374,6 +389,46 @@ contract VadiumHook is IHooks, SafeCallback {
         }
 
         emit Flagged(searcher, slashed, banUntil);
+    }
+
+    /// @notice Receive a watchtower flag delivered cross-chain by Reactive Network.
+    ///
+    /// @dev    Fills the exact gap the on-pool detector leaves behind: `_slash` catches a
+    ///         sandwich, confiscates a portion of the bond into the insurance reserve, and
+    ///         emits `Sandwiched`, but never sets `flaggedUntil` — so a keeper has no
+    ///         legitimate record on which to `drainFlagged`, and the recovered capital
+    ///         stays parked. The Reactive sidecar (`VadiumReactive`) watches the hook's
+    ///         `Sandwiched` event and issues this callback to persist the flag, making the
+    ///         searcher eligible for the reserve payout.
+    ///
+    ///         Authentication is two-fold: the message must arrive through the chain's
+    ///         Reactive Callback Proxy, and the first payload argument (which Reactive
+    ///         Network replaces with the sender ReactVM ID) must match the bound
+    ///         `watchtower`. The owner binds `watchtower` to the sidecar's ReactVM ID.
+    ///
+    /// @param rvmId     The sender ReactVM ID injected by Reactive Network. Must equal the
+    ///                  assigned `watchtower`.
+    /// @param searcher  The address the on-pool detector flagged as a sandwich.
+    /// @param banUntil  Block until which the flag stays active; defaults to the minimum
+    ///                  bond duration window when the detector recorded no ban.
+    function onWatchtowerFlag(address rvmId, address searcher, uint256 banUntil)
+        external
+        onlyCallbackProxy
+    {
+        if (rvmId != watchtower) revert Unauthorized();
+        if (searcher == ZERO) revert("Vadium: zero searcher");
+
+        // Only ever extend toward a window the keeper can still act within. A flag with
+        // no future block is useless for `drainFlagged`, and a fresh flag on an address
+        // that is already flagged is a no-op rather than a silent extension race.
+        if (banUntil == 0) {
+            banUntil = block.number + DEFAULT_MIN_BOND_DURATION_BLOCKS;
+        }
+        if (banUntil <= block.number) revert("Vadium: flag already expired");
+        if (flaggedUntil[searcher] >= block.number) return;
+
+        flaggedUntil[searcher] = banUntil;
+        emit Flagged(searcher, 0, banUntil);
     }
 
     /// @notice Push the full insurance reserve out to the pool's LPs. Keeper-only.

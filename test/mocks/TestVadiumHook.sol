@@ -22,8 +22,11 @@ contract TestVadiumHook is VadiumHook {
         Currency _currency1,
         uint24 _fee,
         int24 _tickSpacing,
-        address _owner
-    ) VadiumHook(_poolManager, _currency0, _currency1, _fee, _tickSpacing, _owner) { }
+        address _owner,
+        address _callbackProxy
+    )
+        VadiumHook(_poolManager, _currency0, _currency1, _fee, _tickSpacing, _owner, _callbackProxy)
+    { }
 
     /// @dev Expose the internal swap-recording logic for unit testing.
     function recordSwap(address sender, bool zeroForOne) external {

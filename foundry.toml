@@ -15,6 +15,8 @@ remappings = [
     "@openzeppelin/contracts/=lib/v4-core/lib/openzeppelin-contracts/contracts/",
     "forge-std/=lib/forge-std/src/",
     "solmate/=lib/v4-core/lib/solmate/",
+    "reactive-lib/=lib/reactive-lib/src/",
+    "reactive-test-lib/=lib/reactive-test-lib/src/",
 ]
 
 [profile.fast]
@@ -33,6 +35,8 @@ remappings = [
     "@openzeppelin/contracts/=lib/v4-core/lib/openzeppelin-contracts/contracts/",
     "forge-std/=lib/forge-std/src/",
     "solmate/=lib/v4-core/lib/solmate/",
+    "reactive-lib/=lib/reactive-lib/src/",
+    "reactive-test-lib/=lib/reactive-test-lib/src/",
 ]
 
 [profile.ci]
@@ -52,6 +56,8 @@ remappings = [
     "@openzeppelin/contracts/=lib/v4-core/lib/openzeppelin-contracts/contracts/",
     "forge-std/=lib/forge-std/src/",
     "solmate/=lib/v4-core/lib/solmate/",
+    "reactive-lib/=lib/reactive-lib/src/",
+    "reactive-test-lib/=lib/reactive-test-lib/src/",
 ]
 
 [rpc_endpoints]
