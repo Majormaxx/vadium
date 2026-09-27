@@ -1,0 +1,28 @@
+{
+  "name": "vadium-indexer",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Ponder indexer and HTTP API for the Vadium hook.",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node scripts/abi.mjs && ponder dev",
+    "start": "node scripts/abi.mjs && ponder start",
+    "codegen": "node scripts/abi.mjs && ponder codegen",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "abi": "node scripts/abi.mjs"
+  },
+  "dependencies": {
+    "hono": "^4.10.0",
+    "ponder": "0.17.12",
+    "viem": "^2.56.3"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0",
+    "vitest": "^3.2.4"
+  }
+}

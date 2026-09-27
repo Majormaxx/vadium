@@ -81,7 +81,7 @@ describe("createApi", () => {
         if (url.includes("/searchers/")) {
           return json({ searcher: "0xabc", bond: null, slashes: [], flags: [{ txHash: "0xf" }] });
         }
-        if (url.endsWith("/status")) {
+        if (url.endsWith("/indexer/status")) {
           return json({ chainId: 1301, indexedBlock: "10", headBlock: "12", hook: "0xhook", lag: "2" });
         }
         return json({}, 500);

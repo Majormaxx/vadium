@@ -217,7 +217,7 @@ export function createApi(options: ApiOptions) {
         };
       }),
     status: () =>
-      get<IndexerStatus>("/status", (body) => {
+      get<IndexerStatus>("/indexer/status", (body) => {
         if (!isRecord(body) || !("indexedBlock" in body)) throw new Error("missing indexedBlock");
         return body as IndexerStatus;
       }),

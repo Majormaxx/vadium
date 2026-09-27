@@ -10,7 +10,7 @@ Read-only web view of the Vadium hook: the pools it protects, their insurance re
 | `/pool/[poolId]` | One pool: reserve, slashed pledged, withdrawn, last checkpoint with the implied price, a staleness card (p50, p95, mean, and a sparkline of per-block drift), then tables of slashes, refunds, bonded addresses, and withheld events, with a short explanation of each number. |
 | `/searcher/[address]` | One router address: bond amount, deposit block, strikes, ban and flag expiry, whether it is currently exempt from the clamp, any claimable refund credit, slash history, and watchtower flags. |
 | `/mechanism` | Plain prose on the clamp, the exemption, the slash, the withheld gains, and the disclosed limits, with links to the repository docs. |
-| `/status` | The indexer's `/status` JSON, a live read of `paused`, `totalBonded`, `totalReserve`, `totalClaimable`, and `insuranceReserve(poolId)` from the hook, and the deployment record for the configured chain. |
+| `/status` | The indexer's `/indexer/status` JSON, a live read of `paused`, `totalBonded`, `totalReserve`, `totalClaimable`, and `insuranceReserve(poolId)` from the hook, and the deployment record for the configured chain. |
 
 When the indexer cannot be reached, each page shows an "Indexer unavailable" notice and keeps the numbers it can read from the chain. Invalid pool ids and addresses return a 404.
 
