@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" fill="none">
+  <g fill="#0C1B33" stroke="#0C1B33" stroke-width="6" stroke-linejoin="round">
+    <path d="M44 20 L74 20 L82 36 L102 36 L110 20 L128 74 L128 140 Z" />
+    <path d="M212 20 L182 20 L174 36 L154 36 L146 20 L128 74 L128 140 Z" />
+  </g>
+  <text x="128" y="188" fill="#0C1B33" text-anchor="middle" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="54" font-weight="800" letter-spacing="-1">Vadium</text>
+  <g stroke="#0C1B33" stroke-width="4" stroke-linecap="round">
+    <line x1="88" y1="206" x2="168" y2="206" />
+    <line x1="88" y1="216" x2="148" y2="216" opacity="0.6" />
+    <line x1="88" y1="226" x2="128" y2="226" opacity="0.35" />
+  </g>
+</svg>

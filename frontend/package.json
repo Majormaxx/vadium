@@ -1,0 +1,39 @@
+{
+  "name": "vadium-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Vadium web app: public landing page and live dashboard for a swap-protection hook.",
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "brand": "node scripts/export-brand.mjs",
+    "abis": "node scripts/fetch-abis.mjs",
+    "router:build": "bash contracts/build-artifact.sh"
+  },
+  "dependencies": {
+    "@tanstack/react-query": "^5.102.8",
+    "@wagmi/connectors": "^8.2.0",
+    "next": "^16.3.4",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "viem": "^2.56.3",
+    "wagmi": "^3.7.7",
+    "zustand": "^5.0.15"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "postcss": "^8.5.0",
+    "sharp": "^0.35.4",
+    "png-to-ico": "^3.0.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.0"
+  }
+}

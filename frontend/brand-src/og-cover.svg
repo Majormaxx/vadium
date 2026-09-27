@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" fill="none">
+  <rect width="1200" height="630" fill="#0C1B33" />
+  <g opacity="0.07" fill="#FFFFFF" stroke="#FFFFFF" stroke-width="14" stroke-linejoin="round">
+    <path d="M886 116 L942 116 L958 150 L1006 150 L1022 116 L1040 232 L1040 384 Z" />
+    <path d="M1314 116 L1258 116 L1242 150 L1194 150 L1178 116 L1040 232 L1040 384 Z" />
+  </g>
+  <g stroke="#FFFFFF" stroke-width="5" stroke-linecap="round" opacity="0.10">
+    <line x1="80" y1="470" x2="1120" y2="470" />
+    <line x1="80" y1="490" x2="900" y2="490" />
+    <line x1="80" y1="510" x2="660" y2="510" />
+  </g>
+  <g fill="#FFFFFF" stroke="#FFFFFF" stroke-width="5" stroke-linejoin="round">
+    <path d="M80 96 L104 96 L110 114 L126 114 L132 96 L160 186 L160 248 Z" />
+    <path d="M240 96 L216 96 L210 114 L194 114 L188 96 L160 186 L160 248 Z" />
+  </g>
+  <text x="196" y="168" fill="#FFFFFF" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="92" font-weight="800" letter-spacing="-2">Vadium</text>
+  <text x="80" y="320" fill="#FFFFFF" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="44" font-weight="600" letter-spacing="-0.5">Your trades shouldn&#39;t pay for bots.</text>
+  <text x="80" y="376" fill="#C9D2DF" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="28" letter-spacing="0.2">Traders get guarded. Pool providers get paid out of the attacker&#39;s own deposit.</text>
+  <g>
+    <circle cx="80" cy="548" r="34" fill="#0C1B33" stroke="#E8A33D" stroke-width="6" />
+    <path d="M68 538 L80 558 L92 538" stroke="#E8A33D" stroke-width="10" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+    <text x="132" y="558" fill="#E8A33D" font-family="Inter, 'Helvetica Neue', Arial, sans-serif" font-size="26" font-weight="600">Public test pilot · audit pending</text>
+  </g>
+</svg>
