@@ -151,7 +151,7 @@ The record of each deploy lives in [`deployments/`](deployments/). The current S
 ```
 git clone --recurse-submodules https://github.com/Majormaxx/vadium
 cd vadium && cp .env.example .env
-make test            # every suite except fork; 218 tests
+make test            # every suite except fork; 222 tests
 make test-fork       # fork suites against UNICHAIN_SEPOLIA_RPC
 make test-invariant  # invariants with a fresh seed, deeper runs
 make snapshot-check  # gas within 2% of .gas-snapshot
@@ -179,6 +179,7 @@ The deploy script mines the CREATE2 salt, deploys, registers the ETH/USDC pool, 
 | [`test/libraries/`](test/libraries/) | Pure math, fuzzed |
 | [`test/React.t.sol`](test/React.t.sol) | Reactive relay end to end on the simulator |
 | [`test/ExampleBondedHook.t.sol`](test/ExampleBondedHook.t.sol) | The module composes without the reference hook |
+| [`test/SimSwapRouter.t.sol`](test/SimSwapRouter.t.sol) | The one-owner bonded router used by the simulator |
 | [`test/fork/`](test/fork/) | Deployed pool state and liquidity on Unichain Sepolia |
 
 ## Known limits

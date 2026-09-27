@@ -56,3 +56,13 @@ This document states what the hook protects, who can act on it, what each actor 
 - Sum of bonds equals `totalBonded`.
 
 See `test/invariant/BondedFlowInvariant.t.sol`.
+
+## Static analysis triage
+
+`make lint` runs slither (fails on medium or higher) and semgrep's smart-contract rules (fails on warning or higher). Remaining low and informational results, reviewed 2026-09-27:
+
+- Slither `incorrect-equality` on `_clampCheckpoint` and `_shortfallInBond`: both compare a block number or a zero amount by design.
+- Slither `reentrancy-no-eth` on `_afterSwap`: the external call is `poolManager.mint`, made from inside the PoolManager's own `afterSwap` callback while the manager is locked; the state written afterwards is the swap record. No path re-enters the hook from that call.
+- Slither `unused-return` on `unlock`, `donate`, `settle`, and `getSlot0`: the return values are not needed; the callback and the delta checks carry the result.
+- Slither `uninitialized-local` on `slashed` in `flagFromWatchtower`: zero is the intended default.
+- Semgrep informational rules (nested ifs, prefix increments, payable constructors, revert strings) are not gated.

@@ -38,7 +38,7 @@ fmt: ## Format
 lint: ## fmt check, slither, semgrep
 	forge fmt --check
 	slither . --config-file slither.config.json --fail-medium
-	semgrep --config p/smart-contracts --error --metrics=off src/
+	semgrep --config p/smart-contracts --error --metrics=off --severity WARNING --severity ERROR src/
 
 deploy-sepolia: ## Deploy hook + pool to Unichain Sepolia and write deployments/1301.json
 	GIT_SHA=$$(git rev-parse --short HEAD) forge script app/script/Deploy.s.sol:DeployVadium \

@@ -15,6 +15,7 @@ import { SafeCallback } from "v4-periphery/src/base/SafeCallback.sol";
 
 import { IBondedFlow } from "../interfaces/IBondedFlow.sol";
 import { BondedFlow } from "../base/BondedFlow.sol";
+import { FeeDiscount } from "../libraries/FeeDiscount.sol";
 
 /// @title ExampleBondedHook
 /// @notice The smallest hook that composes `BondedFlow`: a dynamic-fee pool where
@@ -66,7 +67,7 @@ contract ExampleBondedHook is IHooks, SafeCallback, BondedFlow {
     ) external view onlyPoolManager returns (bytes4, BeforeSwapDelta, uint24 overrideFee) {
         PoolId id = key.toId();
         uint24 base = _pools[id].cfg.baseFee;
-        uint24 fee = _isExempt(id, sender) ? base - DISCOUNT_BPS * 100 : base;
+        uint24 fee = _isExempt(id, sender) ? FeeDiscount.discountedFee(base, DISCOUNT_BPS) : base;
         overrideFee = fee | LPFeeLibrary.OVERRIDE_FEE_FLAG;
         return (IHooks.beforeSwap.selector, BeforeSwapDeltaLibrary.ZERO_DELTA, overrideFee);
     }

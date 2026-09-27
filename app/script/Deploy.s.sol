@@ -26,6 +26,7 @@ import { Chains } from "./Chains.sol";
 ///           INITIAL_SQRT_PRICE   optional pool price; defaults to tick 0 (1:1 raw units,
 ///                                only sensible on testnet)
 ///           GIT_SHA              optional source commit recorded in the deployment file
+///           MIN_BOND             optional testnet-only minimum bond override (raw units)
 ///
 ///         Run: forge script app/script/Deploy.s.sol:DeployVadium --rpc-url unichain_sepolia --broadcast
 contract DeployVadium is Script {
@@ -51,6 +52,10 @@ contract DeployVadium is Script {
         }
 
         IBondedFlow.BondParams memory params = BondParamsLib.unichainDefaults();
+        // Testnet override so a small faucet balance can bond. Ignored on mainnet.
+        if (block.chainid != Chains.UNICHAIN) {
+            params.minBond = vm.envOr("MIN_BOND", params.minBond);
+        }
         IBondedFlow.PoolConfig memory cfg = IBondedFlow.PoolConfig({
             clampEnabled: true,
             exemptFirstSwapOnly: true,

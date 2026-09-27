@@ -37,6 +37,11 @@ import { ISubscriptionService } from "reactive-lib/interfaces/ISubscriptionServi
 ///                 constructor, the owner is passed explicitly rather than from
 ///                 `msg.sender`.
 contract VadiumReactive is AbstractReactive {
+    error ZeroOrigin();
+    error ZeroCallbackTarget();
+    error ZeroOwner();
+    error NotOwner();
+
     /// @notice Origin chain where the hook lives (Unichain Sepolia).
     uint256 public immutable originChainId;
 
@@ -94,9 +99,9 @@ contract VadiumReactive is AbstractReactive {
         uint64 _callbackGasLimit,
         address _owner
     ) payable AbstractReactive() {
-        if (_originContract == address(0)) revert("Vadium: zero origin");
-        if (_callbackTarget == address(0)) revert("Vadium: zero callback target");
-        if (_owner == address(0)) revert("Vadium: zero owner");
+        if (_originContract == address(0)) revert ZeroOrigin();
+        if (_callbackTarget == address(0)) revert ZeroCallbackTarget();
+        if (_owner == address(0)) revert ZeroOwner();
 
         originChainId = _originChainId;
         originContract = _originContract;
@@ -153,15 +158,15 @@ contract VadiumReactive is AbstractReactive {
 
     /// @notice Enable or disable the reaction. Owner-only.
     function setEnabled(bool _enabled) external {
-        if (msg.sender != owner) revert("Vadium: not owner");
+        if (msg.sender != owner) revert NotOwner();
         enabled = _enabled;
         emit EnabledSet(_enabled);
     }
 
     /// @notice Transfer ownership. Owner-only.
     function transferOwnership(address newOwner) external {
-        if (msg.sender != owner) revert("Vadium: not owner");
-        if (newOwner == address(0)) revert("Vadium: zero owner");
+        if (msg.sender != owner) revert NotOwner();
+        if (newOwner == address(0)) revert ZeroOwner();
         owner = newOwner;
     }
 }

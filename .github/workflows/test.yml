@@ -80,7 +80,7 @@ jobs:
       - name: Semgrep
         run: |
           python3 -m pip install --quiet semgrep
-          semgrep --config p/smart-contracts --error --metrics=off src/
+          semgrep --config p/smart-contracts --error --metrics=off --severity WARNING --severity ERROR src/
 
   invariants-nightly:
     name: Invariants (rotating seed)

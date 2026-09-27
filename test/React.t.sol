@@ -168,11 +168,11 @@ contract ReactTest is ReactiveTest {
     }
 
     function test_constructor_revertsOnZeros() public {
-        vm.expectRevert("Vadium: zero origin");
+        vm.expectRevert(VadiumReactive.ZeroOrigin.selector);
         new VadiumReactive(ORIGIN_CHAIN_ID, address(0), address(hook), 300_000, address(this));
-        vm.expectRevert("Vadium: zero callback target");
+        vm.expectRevert(VadiumReactive.ZeroCallbackTarget.selector);
         new VadiumReactive(ORIGIN_CHAIN_ID, address(origin), address(0), 300_000, address(this));
-        vm.expectRevert("Vadium: zero owner");
+        vm.expectRevert(VadiumReactive.ZeroOwner.selector);
         new VadiumReactive(ORIGIN_CHAIN_ID, address(origin), address(hook), 300_000, address(0));
     }
 
@@ -336,7 +336,7 @@ contract ReactTest is ReactiveTest {
 
     function test_setEnabled_onlyOwner_andEvents() public {
         vm.prank(searcher);
-        vm.expectRevert("Vadium: not owner");
+        vm.expectRevert(VadiumReactive.NotOwner.selector);
         rc.setEnabled(false);
         vm.expectEmit(false, false, false, true, address(rc));
         emit VadiumReactive.EnabledSet(false);
@@ -352,10 +352,10 @@ contract ReactTest is ReactiveTest {
         vm.prank(b);
         rc.transferOwnership(c);
         assertEq(rc.owner(), c);
-        vm.expectRevert("Vadium: not owner");
+        vm.expectRevert(VadiumReactive.NotOwner.selector);
         rc.setEnabled(false);
         vm.prank(c);
-        vm.expectRevert("Vadium: zero owner");
+        vm.expectRevert(VadiumReactive.ZeroOwner.selector);
         rc.transferOwnership(address(0));
     }
 }
