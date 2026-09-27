@@ -1,0 +1,26 @@
+{
+  "name": "vadium-sim",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Scenario runner that produces on-chain evidence for the Vadium hook on Unichain Sepolia.",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "artifacts": "node scripts/artifacts.mjs",
+    "plan": "tsx src/cli.ts plan",
+    "run": "tsx src/cli.ts run",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "viem": "^2.56.9"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.0",
+    "vitest": "^5.0.2"
+  }
+}

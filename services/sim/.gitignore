@@ -1,0 +1,6 @@
+.env*
+!.env.example
+node_modules/
+generated/
+reports/
+routers.json
