@@ -3,6 +3,11 @@
 .env.*
 !.env.example
 
+# Internal planning and assessment docs — never committed
+project_info*.md
+docs/internal/
+.claude/
+
 # Foundry artifacts
 cache/
 out/
@@ -20,6 +25,3 @@ node_modules/
 
 # OS
 .DS_Store
-
-# Gas snapshots (generated)
-.gas-snapshot

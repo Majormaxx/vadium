@@ -22,9 +22,9 @@ import { ISubscriptionService } from "reactive-lib/interfaces/ISubscriptionServi
 ///           4. The hook persists `flaggedUntil[searcher]`, making the searcher
 ///              eligible for the reserve payout via `drainFlagged`.
 ///
-///         The hook's on-pool detector intentionally leaves `flaggedUntil` unset, so
-///         this sidecar closes the only gap between "bond slashed" and "reserve
-///         payable to LPs" entirely on-chain, with no off-chain bot or keeper loop.
+///         The hook's on-pool detector flags the searcher itself when it slashes, so
+///         for a same-hook sandwich this relay is redundant. Its value is cross-account,
+///         cross-block, and cross-chain flags that the hot-path detector cannot see.
 ///
 ///         Contract owner (the ReactVM owner) can pause the notification filter or
 ///         switch which subscription/service it uses, but the core reaction is

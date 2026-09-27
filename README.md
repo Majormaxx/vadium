@@ -3,7 +3,7 @@
 [![Solidity](https://img.shields.io/badge/solidity-0.8.26-blue)](https://soliditylang.org)
 [![Foundry](https://img.shields.io/badge/built%20with-Foundry-ff69b4)](https://book.getfoundry.sh)
 [![License: MIT](https://img.shields.io/badge/license-MIT-yellow)](LICENSE)
-[![Tests](https://img.shields.io/badge/tests-121%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
+[![Tests](https://img.shields.io/badge/tests-171%20passing-brightgreen)](https://github.com/Majormaxx/vadium/actions)
 [![Unichain Sepolia](https://img.shields.io/badge/chain-Unichain%20Sepolia-lightgrey)](https://sepolia.uniscan.xyz)
 
 A Uniswap v4 hook that makes sandwich attacks unprofitable instead of just detected. The cost of attacking is staked upfront: a searcher posts a bond in the pool's fee token to earn a lower swap fee, and when their own flow reads as a sandwich, that bond is slashed and held in an LP insurance reserve. No oracle, no swap, no off-chain watcher to run the core pool.
@@ -28,7 +28,9 @@ The load-bearing piece is the tension between the two sides:
 
 **Slash (the stick).** Reusing that same address across a sandwich is exactly what a sandwich looks like to this hook. The `afterSwap` detector checks each swap against the searcher's prior swap in the same block: same address, same block, reversed direction, an intervening swap from a different address. A match confiscates half the bond on first offense, escalates to a full slash plus a re-bonding ban on repeat, and the confiscated capital lands in the LP insurance reserve.
 
-The mechanism does not depend on catching every attacker. To get the discount, a searcher must trade from one visible identity, and trading from one visible identity is how a sandwich gets caught. An attacker who rotates through fresh addresses avoids detection, but forgoes the discount that made bonding worthwhile. Every evasion costs more than the attack earns.
+The mechanism does not depend on catching every attacker. To get the discount, a searcher must trade from one visible identity, and trading from one visible identity is how a sandwich gets caught. An attacker who rotates through fresh addresses avoids the on-pool detector but forgoes the discount that made bonding worthwhile.
+
+That trade is defense-in-depth, not a lock. Rotating identities is a real bypass: the attacker gives up the fee discount, a bounded cost, but nothing in the v1 hook makes that cost exceed the sandwich profit. Closing it, if it ever pays, is a v2 direction, not v1 behavior: the `beforeSwap` fee override is the handle for an asymmetric spread and dynamic fee sized so the attack's own price impact eats the profit. v1 is the on-pool detector plus the LP reserve; identity rotation is disclosed as a limit, not claimed closed.
 
 ## Architecture
 
@@ -72,13 +74,15 @@ flowchart TB
 
 ## Deployments
 
-Nothing is deployed yet; addresses are filled after the testnet broadcast.
+Testnet only. The record of each deploy lives in `deployments/<chainId>.json`.
 
 | Contract | Chain | Address |
 |---|---|---|
-| `VadiumHook` | Unichain Sepolia (1301) | pending |
-| Vadium pool | Unichain Sepolia (1301) | pending |
-| `VadiumReactive` RSC | Lasna testnet (5318007) | pending |
+| `VadiumHook` | Unichain Sepolia (1301) | `0x6d6201097d6549F9760d61019E69E599315dc0C0` (block 61591813, source at `69b21aa`) |
+| Vadium pool (ETH/USDC, 30 bps, spacing 10) | Unichain Sepolia (1301) | `0x8e04e9c3fd9137cdc79ef352d1b1af9c5b3c5384cca2d8641c754bd6a2000304` |
+| `VadiumReactive` RSC | Lasna testnet (5318007) | not deployed |
+
+The deployed bytecode predates the current source (evidence hash on `flagFromWatchtower`, `maxAmount` on `drainFlagged`, on-pool flagging in `_slash`), so the addresses above run the earlier interface until the next broadcast.
 
 ## Reactive watchtower sidecar
 
@@ -89,7 +93,7 @@ A full-featured Reactive Smart Contract (`src/reactive/VadiumReactive.sol`) turn
 3. The Reactive Network injects the ReactVM ID as the callback's first argument (the placeholder the RSC emits as `address(0)`).
 4. The hook's `onlyCallbackProxy` entrypoint verifies the RVM ID matches its bound watchtower and applies the flag.
 
-The callback path is the same one the local watchtower uses: `onWatchtowerFlag` sets a live flag that strips the searcher's fee discount and records a strike under the same two-tier rules, keeping the reserve and ban bookkeeping on-chain and auditable.
+`onWatchtowerFlag` only persists a flag: it strips the searcher's fee discount for the flag window and makes the address keeper-drainable. It records no strike and moves no bond; those stay with the on-pool detector and `flagFromWatchtower`. Because `_slash` already flags the searcher it slashes, the relay is a no-op for a same-hook sandwich while that flag is active. Its value is flags that originate elsewhere.
 
 The deploy uses two separate addresses for the subscription source (`originContract`) and the callback destination (`callbackTarget`); in production both are the hook. The split exists so tests can point the subscription at a fixture emitter while the callback still lands on the real hook.
 
@@ -141,8 +145,8 @@ Slashed token1 is not handed to LPs per sandwich. It accumulates in a pooled res
 
 | Function | Role | Effect |
 |---|---|---|
-| `flagFromWatchtower(searcher, amount, banUntil)` | watchtower | Record a flag; slash up to `amount` from a live bond into the reserve, counting a strike under the same two-tier rules as the on-pool detector |
-| `drainFlagged(searchers)` | keeper | Push the full reserve to in-range LPs via one `unlock`, only while every listed searcher holds an active (unexpired) flag |
+| `flagFromWatchtower(searcher, amount, banUntil, evidenceHash)` | watchtower | Record a flag with an on-chain evidence commitment; slash up to `amount` from a live bond into the reserve, counting a strike under the same two-tier rules as the on-pool detector |
+| `drainFlagged(searchers, maxAmount)` | keeper | Push up to `maxAmount` of the reserve to in-range LPs via one `unlock`, only while every listed searcher holds an active (unexpired) flag |
 | `claimCoverage(amount)` | owner | Push a specific amount of reserve to in-range LPs |
 
 The reserve invariants are `slashedPledged >= withdrawn` (you can only pay out what was slashed) and `remainingCoverage == reserve` (live coverage available). The `_slash` callback credits the reserve without touching the pool, keeping slash cost off the swap hot path.
@@ -188,7 +192,7 @@ Hook runtime bytecode ~5.6 kB, creation ~6.2 kB. These are the per-operation gas
 | `Sandwiched(address,uint256,bool,uint256,uint256)` | searcher | Off-chain |
 | `WatchtowerSet(address)` | watchtower | Audit |
 | `KeeperSet(address)` | keeper | Audit |
-| `Flagged(address,uint256,uint256)` | searcher | Watchtower UI |
+| `Flagged(address,uint256,bytes32,uint256)` | searcher | Watchtower UI |
 | `CoverageClaimed(uint256,uint256)` | -- | Off-chain |
 | `Callback(...)` (RSC) | -- | Reactive Network |
 
@@ -264,7 +268,7 @@ src/reactive/
 └── VadiumReactive.sol            # Cross-chain watchtower RSC (Reactive Network)
 app/script/Deploy.s.sol           # CREATE2 salt mining + pool init
 app/script/DeployReactive.s.sol   # Lasna RSC deploy
-test/                             # 121 tests (unit + integration + reactive + gas)
+test/                             # 171 tests (unit + integration + reactive + gas + fork)
 ```
 
 ## Test
@@ -273,7 +277,7 @@ test/                             # 121 tests (unit + integration + reactive + g
 forge test
 ```
 
-121 tests across 6 suites, all green under the `fast` profile, `forge fmt --check` clean.
+171 tests across 9 suites, all green under the `fast` profile, `forge fmt --check` clean. The two fork suites under `test/fork/` skip unless `UNICHAIN_SEPOLIA_RPC` is set.
 
 | Suite | Area |
 |---|---|
@@ -283,6 +287,9 @@ forge test
 | `FeeDiscount.t.sol` | Override rules, boundaries |
 | `SandwichDetector.t.sol` | Pattern matching |
 | `Integration.t.sol` | Per-user-router end-to-end, real reserve drain, gas benchmarks |
+| `NativeLiquidityRouter.t.sol` | LP bootstrap router against a real PoolManager |
+| `fork/PoolStateRead.t.sol` | Deployed pool state agrees with `deployments/1301.json` (fork) |
+| `fork/AddLiquidityFork.t.sol` | LP addition through the router on the deployed pool (fork) |
 
 The integration tests run against a real `PoolManager` with per-user `SwapRouter` instances, because in v4 the `sender` the hook sees in `afterSwap` is the router, not the EOA. Each actor gets its own router, and the router is the bonded identity.
 
@@ -294,7 +301,7 @@ Detection alone cannot catch everyone, so the design does not rely on it. Three 
 2. **LP insurance reserve.** Even when a clever attacker slips through one layer, the pool keeps a standing fund of past penalties. LPs get recompensed on average, and the fund is visible onchain to anyone who checks. This is what makes imperfect detection acceptable.
 3. **Watchtower.** The hook exposes a one-time watchtower slot whose `flagFromWatchtower` can slash a live bond into the reserve and mark an address for the keeper's `drainFlagged`. That is the on-chain anchor for a slower process that correlates across accounts and across blocks, so rotating through fresh wallets stops hiding the pattern. The on-pool detector is the cheap fast tripwire; the watchtower is the slower, smarter review.
 
-The watchtower is implemented as a Reactive Smart Contract (`VadiumReactive`) rather than a bespoke off-chain watcher. The hook's `Sandwiched` log fires through the Reactive Network, the RSC reacts and emits a callback, and the hook applies it through the verified callback-proxy entrypoint. Because a flag strips the discounted fee for its duration and extends the bond's withdrawal lock, an evader cannot keep trading cheap while flagged and cannot walk away with the residual bond. This is the on-chain anchor for a cross-account, cross-block observer that flags the pattern the hot-path detector cannot see.
+A Reactive Smart Contract (`VadiumReactive`) is one possible watchtower transport. The hook's `Sandwiched` log fires through the Reactive Network, the RSC reacts and emits a callback, and the hook applies it through the verified callback-proxy entrypoint. For a sandwich the hook itself caught the relay adds nothing, since `_slash` already flags the searcher; the transport exists for flags a cross-account, cross-block observer raises that the hot-path detector cannot see. A flag strips the discounted fee for its duration, and the slash extends the bond's withdrawal lock, so an evader cannot keep trading cheap while flagged and cannot walk away with the residual bond.
 
 Disclosed v1 limits:
 
