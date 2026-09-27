@@ -165,6 +165,36 @@ contract VadiumHookTest is Test {
         );
     }
 
+    function test_constructor_revertsOnUnsortedCurrencies() public {
+        // Swap the two token addresses so currency0 >= currency1.
+        vm.expectRevert("Vadium: currencies not sorted");
+        new TestVadiumHook(
+            IPoolManager(pmAddr),
+            Currency.wrap(address(token1)),
+            Currency.wrap(address(token0)),
+            POOL_FEE,
+            TICK_SPACING,
+            address(this),
+            CALLBACK_PROXY
+        );
+    }
+
+    function test_constructor_revertsOnZeroBondToken_beforeSortCheck() public {
+        // A zero token1 (native) must report the bond-token error, not the sorting
+        // error. Exercises the check-ordering so the two invariants stay distinguish-
+        // able to callers.
+        vm.expectRevert("Vadium: bond token cannot be zero address");
+        new TestVadiumHook(
+            IPoolManager(pmAddr),
+            Currency.wrap(address(token0)),
+            Currency.wrap(address(0)),
+            POOL_FEE,
+            TICK_SPACING,
+            address(this),
+            CALLBACK_PROXY
+        );
+    }
+
     function test_constructor_setsExplicitOwner() public view {
         assertEq(hook.owner(), address(this), "owner is the explicit constructor arg");
     }
@@ -517,6 +547,91 @@ contract VadiumHookTest is Test {
         assertEq(hook.totalWithdrawn(), 0);
     }
 
+    // -------------------------------------------------------------------------
+    // On-pool slash flags the searcher for keeper drainage
+    // -------------------------------------------------------------------------
+
+    function test_onPoolSlash_firstOffense_setsFlagToExtensionWindow() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        // A first-offense on-pool slash must set an active flag so a keeper can drain
+        // the reserve without the Reactive relay. The window is twice the withdrawal
+        // lock so a keeper can still drain after the residual bond matures.
+        assertEq(
+            hook.flaggedUntil(searcher),
+            1000 + 2 * hook.FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS(),
+            "first-offense slash should flag to the extension window"
+        );
+    }
+
+    function test_onPoolSlash_repeatOffense_setsFlagToBanWindow() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        // Repeat offense within the extended lock.
+        vm.roll(1001);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        // Repeat slash -> flag to the (longer) ban window, so the keeper has ample time.
+        assertEq(
+            hook.flaggedUntil(searcher),
+            1001 + hook.REPEAT_OFFENSE_BAN_BLOCKS(),
+            "repeat slash should flag to the ban window"
+        );
+    }
+
+    function test_onPoolSlash_doesNotShortenExistingWatchtowerFlag() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        // A longer watchtower flag is already active on the searcher.
+        uint256 longFlag = block.number + 10_000_000;
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, longFlag, keccak256("evidence"));
+
+        // An on-pool slash with a shorter default window must not shorten it.
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(block.number + 1);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        assertEq(
+            hook.flaggedUntil(searcher),
+            longFlag,
+            "on-pool slash should never shorten an active watchtower flag"
+        );
+    }
+
+    function test_onPoolSlash_unbonded_noFlag() public {
+        // Not bonded: _slash returns early; no reserve, no flag.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.flaggedUntil(searcher), 0, "no flag when nothing was slashed");
+    }
+
     function test_multipleSequentialSwapsInBlock_noFalsePositive() public {
         vm.startPrank(searcher);
         hook.bond(BOND_AMOUNT);
@@ -574,7 +689,7 @@ contract VadiumHookTest is Test {
 
     function test_flagFromWatchtower_onlyWatchtower() public {
         vm.expectRevert();
-        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, keccak256("evidence"));
     }
 
     function test_flagFromWatchtower_slashesBondIntoReserve() public {
@@ -586,7 +701,7 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
 
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10, keccak256("evidence"));
 
         // Bond split: half stays, half moves into the reserve. Flag recorded.
         assertEq(hook.bondedBalance(searcher), BOND_AMOUNT / 2);
@@ -605,7 +720,9 @@ contract VadiumHookTest is Test {
 
         // Request more than the full bond; the slash is capped at the bond balance.
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, type(uint256).max, block.number + 10);
+        hook.flagFromWatchtower(
+            searcher, type(uint256).max, block.number + 10, keccak256("evidence")
+        );
         assertEq(hook.bondedBalance(searcher), 0);
         assertEq(hook.insuranceReserve(), BOND_AMOUNT);
     }
@@ -615,7 +732,7 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
 
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, BOND_AMOUNT, block.number + 20);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT, block.number + 20, keccak256("evidence"));
 
         // No bond to slash, but the flag is recorded for a later keeper drain.
         assertEq(hook.insuranceReserve(), 0);
@@ -755,7 +872,7 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
 
         vm.prank(watch);
-        hook.flagFromWatchtower(victim, 0, block.number + 10);
+        hook.flagFromWatchtower(victim, 0, block.number + 10, keccak256("evidence"));
 
         address[] memory flagged = new address[](1);
         flagged[0] = victim;
@@ -763,7 +880,7 @@ contract VadiumHookTest is Test {
         // Random caller, not the keeper -> unauthorized.
         vm.prank(searcher);
         vm.expectRevert();
-        hook.drainFlagged(flagged);
+        hook.drainFlagged(flagged, type(uint256).max);
     }
 
     function test_drainFlagged_requiresFlag() public {
@@ -774,7 +891,7 @@ contract VadiumHookTest is Test {
 
         vm.prank(hook.keeper());
         vm.expectRevert();
-        hook.drainFlagged(flagged);
+        hook.drainFlagged(flagged, type(uint256).max);
     }
 
     function test_drainFlagged_emptyList_reverts() public {
@@ -783,7 +900,98 @@ contract VadiumHookTest is Test {
         address[] memory flagged = new address[](0);
         vm.prank(hook.keeper());
         vm.expectRevert();
-        hook.drainFlagged(flagged);
+        hook.drainFlagged(flagged, type(uint256).max);
+    }
+
+    function test_drainFlagged_zeroCap_reverts() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+        // The test contract is the owner; make it the keeper too so the drain call
+        // runs as the keeper by default.
+        hook.setKeeper(address(this));
+
+        // Flag searcher so the flag preconditions pass, then attempt a zero-cap drain.
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, keccak256("evidence"));
+
+        // A zero cap is an explicit no-op request; reject it rather than silently
+        // draining nothing (which could mask a misconfigured caller).
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+        vm.expectRevert("Vadium: zero payout");
+        hook.drainFlagged(flagged, 0);
+    }
+
+    function test_drainFlagged_cap_limitsPayout() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        // On-pool slash: 50% of 100e6 -> 50e6 reserve, sender auto-flagged.
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        hook.setKeeper(makeAddr("kee"));
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+
+        // A cap below the reserve releases only the capped slice; the rest stays.
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged, BOND_AMOUNT / 4);
+        assertEq(drained, BOND_AMOUNT / 4, "drain is bounded by the cap");
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 4, "remaining reserve stays parked");
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 4);
+    }
+
+    function test_drainFlagged_cap_neverExceedsReserve() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        hook.setKeeper(makeAddr("kee"));
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+
+        // An oversized cap is clamped to the live reserve, so it can never over-issue.
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
+        assertEq(drained, BOND_AMOUNT / 2, "drain clamps to the live reserve");
+        assertEq(hook.insuranceReserve(), 0);
+    }
+
+    function test_drainFlagged_paced_multiStepDrain() public {
+        vm.startPrank(searcher);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+
+        vm.roll(1000);
+        hook.recordSwap(searcher, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+
+        hook.setKeeper(makeAddr("kee"));
+        address[] memory flagged = new address[](1);
+        flagged[0] = searcher;
+
+        // Pace the payout in two capped steps; both succeed while the flag stays active.
+        vm.prank(hook.keeper());
+        hook.drainFlagged(flagged, BOND_AMOUNT / 4);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 4);
+
+        vm.prank(hook.keeper());
+        hook.drainFlagged(flagged, BOND_AMOUNT / 4);
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(hook.totalWithdrawn(), BOND_AMOUNT / 2);
     }
 
     function test_drainFlagged_pushesReserve() public {
@@ -791,24 +999,23 @@ contract VadiumHookTest is Test {
         hook.bond(BOND_AMOUNT);
         vm.stopPrank();
 
-        // Build a reserve with two slashes credited to the same flagged address.
+        // Build a reserve with a slash credited to the same flagged address. The
+        // on-pool slash records the flag itself, so no watchtower flag is needed.
         vm.roll(1000);
         hook.recordSwap(searcher, true);
         hook.recordSwap(victim, false);
         hook.recordSwap(searcher, false);
         assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+        assertTrue(hook.flaggedUntil(searcher) > block.number, "on-pool slash flags the sender");
 
-        address watch = makeAddr("watch");
-        hook.setWatchtower(watch);
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        hook.setKeeper(makeAddr("kee"));
 
         address[] memory flagged = new address[](1);
         flagged[0] = searcher;
 
         uint256 hookBalBefore = token1.balanceOf(address(hook));
         vm.prank(hook.keeper());
-        uint256 drained = hook.drainFlagged(flagged);
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
 
         assertEq(drained, BOND_AMOUNT / 2, "drain returns the full reserve");
         assertEq(hook.insuranceReserve(), 0);
@@ -866,7 +1073,7 @@ contract VadiumHookTest is Test {
         // First watchtower flag slashes half the bond, records a strike, and extends
         // the lock — but does not yet ban.
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 3);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 3, keccak256("evidence"));
         (uint256 amt,, uint256 bannedUntil, uint256 strikes) = hook.bonds(searcher);
         assertEq(amt, BOND_AMOUNT / 2);
         assertEq(bannedUntil, 0, "first watchtower flag has not banned");
@@ -876,14 +1083,16 @@ contract VadiumHookTest is Test {
         // A repeat flag is refused while the prior flag is still live.
         vm.prank(watch);
         vm.expectRevert();
-        hook.flagFromWatchtower(searcher, 0, block.number + 1_000);
+        hook.flagFromWatchtower(searcher, 0, block.number + 1_000, keccak256("evidence"));
 
         // Once the first (short) flag expires but we are still inside the extended
         // lock, a second watchtower slash escalates to a full ban and drains the
         // residual bond.
         vm.roll(block.number + 4);
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, type(uint256).max, block.number + 3);
+        hook.flagFromWatchtower(
+            searcher, type(uint256).max, block.number + 3, keccak256("evidence")
+        );
         assertEq(hook.bondedBalance(searcher), 0);
         assertEq(hook.insuranceReserve(), BOND_AMOUNT);
         assertTrue(hook.isBanned(searcher), "repeat watchtower slash draws the ban");
@@ -929,48 +1138,42 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
         hook.setKeeper(makeAddr("kee"));
 
+        // Credit the reserve with a short-expiry watchtower slash so the flag can
+        // lapse within the test. A watchtower slash both sets the flag and parks
+        // capital in the reserve in one call.
         vm.startPrank(searcher);
         hook.bond(BOND_AMOUNT);
         vm.stopPrank();
-        vm.roll(1000);
-        hook.recordSwap(searcher, true);
-        hook.recordSwap(victim, false);
-        hook.recordSwap(searcher, false);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 3, keccak256("evidence"));
         assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
 
         // Still active: keeper drains.
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 3);
         address[] memory flagged = new address[](1);
         flagged[0] = searcher;
         vm.prank(hook.keeper());
-        uint256 drained = hook.drainFlagged(flagged);
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
         assertEq(drained, BOND_AMOUNT / 2, "active flag drains the reserve");
         assertEq(hook.insuranceReserve(), 0);
 
         // A fresh offense into a second bond, flagged with a short expiry: once the
         // flag lapses, the same drain is rejected.
         address searcher2 = makeAddr("searcher2");
-        address victim2 = makeAddr("victim2");
         vm.startPrank(searcher2);
         token1.mint(searcher2, 10_000e6);
         token1.approve(address(hook), type(uint256).max);
         hook.bond(BOND_AMOUNT);
         vm.stopPrank();
-        vm.roll(2000);
-        hook.recordSwap(searcher2, true);
-        hook.recordSwap(victim2, false);
-        hook.recordSwap(searcher2, false);
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher2, BOND_AMOUNT / 2, block.number + 3, keccak256("evidence"));
         assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
 
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher2, 0, block.number + 3);
         vm.roll(block.number + 5);
         address[] memory flagged2 = new address[](1);
         flagged2[0] = searcher2;
         vm.prank(hook.keeper());
         vm.expectRevert();
-        hook.drainFlagged(flagged2);
+        hook.drainFlagged(flagged2, type(uint256).max);
     }
 
     function test_beforeSwap_flagStripsDiscount() public {
@@ -991,7 +1194,7 @@ contract VadiumHookTest is Test {
         // A live watchtower flag strips the discount even though the address is not
         // banned.
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, keccak256("evidence"));
         vm.prank(pmAddr);
         (,, uint24 post) = hook.beforeSwap(searcher, poolKey, params, "");
         assertTrue(post == 0, "flagged address loses the discount");
@@ -1151,7 +1354,7 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
 
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 10);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, keccak256("evidence"));
 
         // No slash occurred, bond intact; flag recorded; strike NOT counted
         // because toSlash == 0 skips the entire slash/escalation block.
@@ -1168,7 +1371,7 @@ contract VadiumHookTest is Test {
 
         vm.prank(watch);
         vm.expectRevert("Vadium: flag already expired");
-        hook.flagFromWatchtower(searcher, 0, block.number);
+        hook.flagFromWatchtower(searcher, 0, block.number, keccak256("evidence"));
     }
 
     function test_flagFromWatchtower_emitsFlaggedEvent() public {
@@ -1180,10 +1383,10 @@ contract VadiumHookTest is Test {
         hook.setWatchtower(watch);
 
         vm.expectEmit(true, false, false, true, address(hook));
-        emit VadiumHook.Flagged(searcher, BOND_AMOUNT / 2, block.number + 10);
+        emit VadiumHook.Flagged(searcher, BOND_AMOUNT / 2, keccak256("evidence"), block.number + 10);
 
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10);
+        hook.flagFromWatchtower(searcher, BOND_AMOUNT / 2, block.number + 10, keccak256("evidence"));
     }
 
     function test_flagFromWatchtower_zeroSearcher_reverts() public {
@@ -1192,7 +1395,28 @@ contract VadiumHookTest is Test {
 
         vm.prank(watch);
         vm.expectRevert("Vadium: zero searcher");
-        hook.flagFromWatchtower(address(0), 0, block.number + 10);
+        hook.flagFromWatchtower(address(0), 0, block.number + 10, keccak256("evidence"));
+    }
+
+    function test_flagFromWatchtower_missingEvidence_reverts() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        vm.prank(watch);
+        vm.expectRevert("Vadium: missing evidence");
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, bytes32(0));
+    }
+
+    function test_flagFromWatchtower_storesAndSurfacesEvidence() public {
+        address watch = makeAddr("watch");
+        hook.setWatchtower(watch);
+
+        bytes32 evidence = keccak256(abi.encodePacked("tx", block.number));
+        vm.prank(watch);
+        hook.flagFromWatchtower(searcher, 0, block.number + 10, evidence);
+
+        assertEq(hook.flagEvidence(searcher), evidence, "evidence stored against searcher");
+        assertEq(hook.flaggedUntil(searcher), block.number + 10);
     }
 
     // -------------------------------------------------------------------------
@@ -1218,41 +1442,41 @@ contract VadiumHookTest is Test {
         hook.recordSwap(victim, false);
         hook.recordSwap(searcher2, false);
 
-        address watch = makeAddr("watch");
-        hook.setWatchtower(watch);
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 10);
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher2, 0, block.number + 10);
+        // Both on-pool slashes flag their searchers as a side effect.
+        assertTrue(hook.flaggedUntil(searcher) > block.number);
+        assertTrue(hook.flaggedUntil(searcher2) > block.number);
 
         address[] memory flagged = new address[](2);
         flagged[0] = searcher;
         flagged[1] = searcher2;
 
         vm.prank(hook.keeper());
-        uint256 drained = hook.drainFlagged(flagged);
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
         assertEq(drained, BOND_AMOUNT, "drained both slashes");
         assertEq(hook.insuranceReserve(), 0);
     }
 
     function test_drainFlagged_multiSearchers_oneExpired_reverts() public {
-        vm.startPrank(searcher);
-        hook.bond(BOND_AMOUNT);
-        vm.stopPrank();
-
-        vm.roll(1000);
-        hook.recordSwap(searcher, true);
-        hook.recordSwap(victim, false);
-        hook.recordSwap(searcher, false);
-
         address watch = makeAddr("watch");
         hook.setWatchtower(watch);
 
-        // Flag searcher with a short window, searcher2 with a long one.
+        // Build a reserve via an on-pool slash on searcher2; that slash flags
+        // searcher2 with a long window.
+        vm.startPrank(searcher2);
+        token1.mint(searcher2, 10_000e6);
+        token1.approve(address(hook), type(uint256).max);
+        hook.bond(BOND_AMOUNT);
+        vm.stopPrank();
+        vm.roll(1000);
+        hook.recordSwap(searcher2, true);
+        hook.recordSwap(victim, false);
+        hook.recordSwap(searcher2, false);
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+        assertTrue(hook.flaggedUntil(searcher2) > block.number);
+
+        // Flag searcher with a short window only (no on-pool slash, so no auto-flag).
         vm.prank(watch);
-        hook.flagFromWatchtower(searcher, 0, block.number + 3);
-        vm.prank(watch);
-        hook.flagFromWatchtower(searcher2, 0, block.number + 100);
+        hook.flagFromWatchtower(searcher, 0, block.number + 3, keccak256("evidence"));
 
         // Expire searcher's flag.
         vm.roll(block.number + 5);
@@ -1263,7 +1487,7 @@ contract VadiumHookTest is Test {
 
         vm.prank(hook.keeper());
         vm.expectRevert();
-        hook.drainFlagged(flagged);
+        hook.drainFlagged(flagged, type(uint256).max);
     }
 
     // -------------------------------------------------------------------------

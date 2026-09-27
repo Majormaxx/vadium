@@ -508,21 +508,21 @@ contract VadiumIntegrationTest is Test {
 
     function test_reserveDrain_landsInPoolManager() public {
         // Set roles. owner == this (the test contract deployed the hook impl).
-        address watch = makeAddr("watch");
-        hook.setWatchtower(watch);
+        hook.setWatchtower(makeAddr("watch"));
         hook.setKeeper(makeAddr("kee"));
 
         _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
 
-        // Build a 50e6 reserve via a real sandwich.
+        // Build a 50e6 reserve via a real sandwich. The on-pool slash records the
+        // flag itself, so no watchtower flag is required before the keeper drain.
         _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
         _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
         _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
         assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
-
-        // The watchtower flags the searcher so the keeper drain has a justification.
-        vm.prank(watch);
-        hook.flagFromWatchtower(address(searcherRouter), 0, block.number + 100);
+        assertTrue(
+            hook.flaggedUntil(address(searcherRouter)) > block.number,
+            "on-pool slash flags the searcher"
+        );
 
         uint256 hookBalBefore = token1.balanceOf(address(hook));
         uint256 pmBalBefore = token1.balanceOf(address(pm));
@@ -531,7 +531,7 @@ contract VadiumIntegrationTest is Test {
         address[] memory flagged = new address[](1);
         flagged[0] = address(searcherRouter);
         vm.prank(hook.keeper());
-        uint256 drained = hook.drainFlagged(flagged);
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
 
         assertEq(drained, BOND_AMOUNT / 2, "drain returns the full reserve");
         assertEq(hook.insuranceReserve(), 0);
@@ -553,16 +553,55 @@ contract VadiumIntegrationTest is Test {
     }
 
     // -------------------------------------------------------------------------
+    // Test: on-pool slash alone is keeper-drainable, no watchtower/relay needed
+    // -------------------------------------------------------------------------
+
+    function test_onPoolSlash_drainableWithoutWatchtower() public {
+        // Keeper is assigned; the watchtower is deliberately left unset. The on-pool
+        // detector must record a flag itself so the reserve is not stranded.
+        hook.setKeeper(makeAddr("kee"));
+        assertEq(hook.watchtower(), address(0), "watchtower must be unset for this test");
+
+        _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
+
+        // Real sandwich -> on-pool slash parks 50e6 in the reserve and flags the sender.
+        _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
+        _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
+        _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
+
+        assertEq(hook.insuranceReserve(), BOND_AMOUNT / 2);
+        assertTrue(
+            hook.flaggedUntil(address(searcherRouter)) > block.number,
+            "on-pool slash must flag the searcher"
+        );
+
+        uint256 hookBalBefore = token1.balanceOf(address(hook));
+
+        // A keeper drains with no watchtower flag ever issued.
+        address[] memory flagged = new address[](1);
+        flagged[0] = address(searcherRouter);
+        vm.prank(hook.keeper());
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
+
+        assertEq(drained, BOND_AMOUNT / 2, "on-pool-slashed reserve is drainable");
+        assertEq(hook.insuranceReserve(), 0);
+        assertEq(
+            token1.balanceOf(address(hook)),
+            hookBalBefore - BOND_AMOUNT / 2,
+            "hook escrow drops by the drained amount"
+        );
+    }
+
+    // -------------------------------------------------------------------------
     // Test: reserve invariant holds across partial drain + bond withdrawal
     // -------------------------------------------------------------------------
 
     function test_partialDrain_afterWithdrawal_preservesSolvency() public {
-        address watch = makeAddr("watch");
-        hook.setWatchtower(watch);
         hook.setKeeper(makeAddr("kee"));
         _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
 
-        // Build a 50e6 reserve via a real sandwich; bond falls to 50e6.
+        // Build a 50e6 reserve via a real sandwich; bond falls to 50e6. The on-pool
+        // slash flags the searcher, so no watchtower flag is needed at drain time.
         _swapThrough(searcher, searcherRouter, true, -int256(SWAP_AMOUNT));
         _swapThrough(victim, victimRouter, false, -int256(SWAP_AMOUNT));
         _swapThrough(searcher, searcherRouter, false, -int256(SWAP_AMOUNT));
@@ -582,14 +621,11 @@ contract VadiumIntegrationTest is Test {
         // Escrow now only backs the reserve.
         assertEq(token1.balanceOf(address(hook)), BOND_AMOUNT / 2, "escrow = reserve only");
 
-        // Flag so the keeper drain is justified, then drain the reserve against a
-        // solvent hook.
-        vm.prank(watch);
-        hook.flagFromWatchtower(address(searcherRouter), 0, block.number + 100);
+        // Drain the reserve against a solvent hook, justified by the on-pool flag.
         address[] memory flagged = new address[](1);
         flagged[0] = address(searcherRouter);
         vm.prank(hook.keeper());
-        uint256 drained = hook.drainFlagged(flagged);
+        uint256 drained = hook.drainFlagged(flagged, type(uint256).max);
         assertEq(drained, BOND_AMOUNT / 2, "drain moves the full reserve");
         assertEq(hook.insuranceReserve(), 0);
         assertEq(token1.balanceOf(address(hook)), 0, "hook escrow fully discharged");

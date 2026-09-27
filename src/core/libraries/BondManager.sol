@@ -35,21 +35,6 @@ library BondManager {
     // Expiry
     // -------------------------------------------------------------------------
 
-    /// @notice Whether a bond's minimum duration has elapsed.
-    ///
-    /// @param self            The bond to check.
-    /// @param minDuration     Minimum lock duration in blocks.
-    /// @param currentBlock    Current block number.
-    ///
-    /// @return true once `currentBlock >= depositBlock + minDuration`.
-    function isMatured(Bond storage self, uint256 minDuration, uint256 currentBlock)
-        internal
-        view
-        returns (bool)
-    {
-        return currentBlock >= self.depositBlock + minDuration;
-    }
-
     /// @notice Whether the bond's lock was extended to cover the current block.
     ///
     /// @dev    First offenses extend the minimum-duration window by `extension` blocks

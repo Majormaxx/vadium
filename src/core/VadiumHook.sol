@@ -18,7 +18,7 @@ import { BondManager } from "./libraries/BondManager.sol";
 import { FeeDiscount } from "./libraries/FeeDiscount.sol";
 import { InsurancePolicy } from "./libraries/InsurancePolicy.sol";
 import { SandwichDetector } from "./libraries/SandwichDetector.sol";
-import { IVadiumHook } from "./interfaces/IVadiumHook.sol";
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 
 /// @title VadiumHook
 /// @notice Uniswap v4 hook that lets searchers post a bond in exchange for a swap-fee
@@ -164,11 +164,17 @@ contract VadiumHook is IHooks, SafeCallback {
     /// @notice The pooled LP insurance reserve.
     InsurancePolicy.InsuranceState internal insurance;
 
-    /// @notice End-of-flag block for an address flagged by the watchtower. An address
-    ///         flagged via watchtower (without an on-chain bond) becomes eligible for
-    ///         the reserve payout only once it is drained through this map's presence
-    ///         during `drainFlagged`.
+    /// @notice End-of-flag block for a flagged address. Set by the on-pool detector on a
+    ///         slash, by the watchtower, or by a Reactive callback. Only addresses with
+    ///         an active flag justify a keeper `drainFlagged`, and a live flag strips the
+    ///         fee discount for its duration.
     mapping(address searcher => uint256 flaggedUntil) public flaggedUntil;
+
+    /// @notice Evidence commitment attached to the most recent watchtower flag for a
+    ///         searcher. The watchtower must supply a non-zero digest (e.g. the hash of
+    ///         the on-chain or off-chain transaction it is responding to) so a flag is
+    ///         auditably grounded in something, not a bare assertion.
+    mapping(address searcher => bytes32 evidenceHash) public flagEvidence;
 
     // -------------------------------------------------------------------------
     // Errors
@@ -225,8 +231,11 @@ contract VadiumHook is IHooks, SafeCallback {
     event KeeperSet(address indexed keeper);
 
     /// @notice Emitted when the watchtower flags an address (and optionally slashes a
-    ///         live bond into the reserve).
-    event Flagged(address indexed searcher, uint256 slashed, uint256 flaggedUntil);
+    ///         live bond into the reserve). `evidenceHash` is the commitment the
+    ///         watchtower attached to justify the flag.
+    event Flagged(
+        address indexed searcher, uint256 slashed, bytes32 evidenceHash, uint256 flaggedUntil
+    );
 
     /// @notice Emitted when reserve capital is pushed out to in-range LPs.
     event CoverageClaimed(uint256 amount, uint256 remainingReserve);
@@ -257,15 +266,28 @@ contract VadiumHook is IHooks, SafeCallback {
         if (_owner == ZERO) revert("Vadium: zero owner");
         if (_callbackProxy == ZERO) revert("Vadium: zero callback proxy");
 
+        // The bond is ERC-20 token1, so the zero address (native token) is invalid.
+        // Checked before the sort check below: a zero token1 is also unsorted (any
+        // address >= 0), so without this ordering the caller sees a sorting error
+        // where a bond-token error is intended.
+        if (Currency.unwrap(_currency1) == ZERO) {
+            revert("Vadium: bond token cannot be zero address");
+        }
+
+        // v4 requires the two pool currencies to be sorted by address (currency0 <
+        // currency1). A malformed PoolKey either reverts at PoolManager.initialize or
+        // behaves unexpectedly, so enforce the invariant at construction instead of
+        // relying on the deployer to order them correctly.
+        if (Currency.unwrap(_currency0) >= Currency.unwrap(_currency1)) {
+            revert("Vadium: currencies not sorted");
+        }
+
         fee = _fee;
         tickSpacing = _tickSpacing;
         currency0 = _currency0;
         currency1 = _currency1;
         bondToken = IERC20(Currency.unwrap(_currency1));
         callbackProxy = _callbackProxy;
-
-        // The bond is ERC-20 token1, so the zero address (native token) is invalid.
-        if (address(bondToken) == ZERO) revert("Vadium: bond token cannot be zero address");
 
         // A foundry CREATE2 broadcast deploys through its factory, so `msg.sender`
         // is the factory, not the deployer. The owner is therefore passed explicitly
@@ -348,20 +370,31 @@ contract VadiumHook is IHooks, SafeCallback {
     ///         on-chain bond lets the hook confiscate capital now, not in a later drain).
     ///         An unbonded address is flagged but left for the keeper's later `drainFlagged`.
     ///
-    /// @param searcher  Address to flag.
-    /// @param amount    Token1 to slash from a live bond (0 leaves the bond untouched and
-    ///                  only records the flag).
-    /// @param banUntil  Block before which the flag is considered active.
-    function flagFromWatchtower(address searcher, uint256 amount, uint256 banUntil)
-        external
-        onlyWatchtower
-    {
+    ///         The watchtower must attach a non-zero `evidenceHash` (a commitment to the
+    ///         transaction, event, or off-chain signal it is responding to). This makes
+    ///         every manual flag auditably grounded on-chain rather than a bare assertion
+    ///         from a single oracle, and the digest is surfaced in the `Flagged` event and
+    ///         stored against the searcher.
+    ///
+    /// @param searcher     Address to flag.
+    /// @param amount       Token1 to slash from a live bond (0 leaves the bond untouched
+    ///                     and only records the flag).
+    /// @param banUntil     Block before which the flag is considered active.
+    /// @param evidenceHash Non-zero commitment justifying the flag.
+    function flagFromWatchtower(
+        address searcher,
+        uint256 amount,
+        uint256 banUntil,
+        bytes32 evidenceHash
+    ) external onlyWatchtower {
         if (searcher == ZERO) revert("Vadium: zero searcher");
+        if (evidenceHash == bytes32(0)) revert("Vadium: missing evidence");
         if (banUntil <= block.number) revert("Vadium: flag already expired");
         if (flaggedUntil[searcher] != 0 && flaggedUntil[searcher] >= block.number) {
             revert("Vadium: re-flag before expiry");
         }
         flaggedUntil[searcher] = banUntil;
+        flagEvidence[searcher] = evidenceHash;
 
         BondManager.Bond storage b = bonds[searcher];
         uint256 slashed = 0;
@@ -388,18 +421,16 @@ contract VadiumHook is IHooks, SafeCallback {
             }
         }
 
-        emit Flagged(searcher, slashed, banUntil);
+        emit Flagged(searcher, slashed, evidenceHash, banUntil);
     }
 
     /// @notice Receive a watchtower flag delivered cross-chain by Reactive Network.
     ///
-    /// @dev    Fills the exact gap the on-pool detector leaves behind: `_slash` catches a
-    ///         sandwich, confiscates a portion of the bond into the insurance reserve, and
-    ///         emits `Sandwiched`, but never sets `flaggedUntil` — so a keeper has no
-    ///         legitimate record on which to `drainFlagged`, and the recovered capital
-    ///         stays parked. The Reactive sidecar (`VadiumReactive`) watches the hook's
-    ///         `Sandwiched` event and issues this callback to persist the flag, making the
-    ///         searcher eligible for the reserve payout.
+    /// @dev    The on-pool detector already flags a searcher when it slashes, so for a
+    ///         same-hook sandwich this callback is a no-op while that flag is active. Its
+    ///         value is flags that originate elsewhere: a Reactive observer correlating
+    ///         across accounts, blocks, or chains can persist a flag here and make the
+    ///         address keeper-drainable.
     ///
     ///         Authentication is two-fold: the message must arrive through the chain's
     ///         Reactive Callback Proxy, and the first payload argument (which Reactive
@@ -428,19 +459,29 @@ contract VadiumHook is IHooks, SafeCallback {
         if (flaggedUntil[searcher] >= block.number) return;
 
         flaggedUntil[searcher] = banUntil;
-        emit Flagged(searcher, 0, banUntil);
+        emit Flagged(searcher, 0, bytes32(0), banUntil);
     }
 
-    /// @notice Push the full insurance reserve out to the pool's LPs. Keeper-only.
+    /// @notice Push a bounded slice of the insurance reserve out to the pool's LPs.
+    ///         Keeper-only.
     ///
-    /// @dev    Requires every listed address to hold an active watchtower flag. The
-    ///         payout happens through a real PoolManager `unlock`, so the settlement
-    ///         (donate + sync + settle) runs in one atomic callback. This is the path a
-    ///         Reactive watchtower would trigger on-chain.
+    /// @dev    Requires every listed address to hold an active watchtower flag (the
+    ///         on-pool detector records these itself on a slash). The payout happens
+    ///         through a real PoolManager `unlock`, so the settlement (donate + sync +
+    ///         settle) runs in one atomic callback.
     ///
-    /// @param searchers  Flagged addresses that justify the payout.
-    /// @return amount    The token1 pushed out of the reserve.
-    function drainFlagged(address[] calldata searchers)
+    ///         The `maxAmount` bound caps a single drain. Without it, one keeper call
+    ///         would move the entire pooled reserve to whichever LPs happen to be
+    ///         in-range at that block, with no pacing or upper bound. The cap lets the
+    ///         keeper (or the owner via `claimCoverage`) release reserve capital in
+    ///         deliberate, bounded steps rather than a single full sweep. It never
+    ///         releases more than the live reserve.
+    ///
+    /// @param searchers   Flagged addresses that justify the payout (all must be active).
+    /// @param maxAmount   Upper bound of token1 to release in this call; capped at the
+    ///                    live reserve.
+    /// @return amount     The token1 actually pushed out of the reserve.
+    function drainFlagged(address[] calldata searchers, uint256 maxAmount)
         external
         onlyKeeper
         returns (uint256 amount)
@@ -450,7 +491,9 @@ contract VadiumHook is IHooks, SafeCallback {
             // Only an active (unexpired) flag justifies a payout.
             if (flaggedUntil[searchers[i]] <= block.number) revert NotFlagged();
         }
-        return _payout(insurance.reserve);
+        if (maxAmount == 0) revert("Vadium: zero payout");
+        uint256 release = maxAmount < insurance.reserve ? maxAmount : insurance.reserve;
+        return _payout(release);
     }
 
     /// @notice Push a specific amount of reserve capital out to the pool's LPs.
@@ -790,13 +833,22 @@ contract VadiumHook is IHooks, SafeCallback {
         lastSwapperPosition = position;
     }
 
-    /// @notice Confiscate bond capital for a detected sandwich and donate it to LPs.
+    /// @notice Confiscate bond capital for a detected sandwich and park it in the
+    ///         LP insurance reserve.
     ///
     /// @dev    Two-tier slash: the first offense takes only a portion and extends the
     ///         lock; a repeat within the extended window takes the full remaining bond
     ///         and bans the address. This is calibrated against false positives — a
     ///         same-block direction reversal is a strong signal but not proof beyond
     ///         doubt, so a full slash on a first violation is disproportionate.
+    ///
+    ///         An on-pool slash also records a watchtower flag (`flaggedUntil`) for the
+    ///         searcher, so the confiscated reserve is immediately keeper-drainable via
+    ///         `drainFlagged` without waiting on the Reactive relay. The flag window
+    ///         matches the bond tier (extension lock on a first offense, ban window on a
+    ///         repeat), and only ever extends an already-active flag. The Reactive
+    ///         sidecar remains an additional cross-account/cross-block detector rather
+    ///         than the only path that makes slashed capital payable to LPs.
     ///
     /// @param sender  The bonded address flagged for a sandwich.
     function _slash(address sender) internal {
@@ -831,7 +883,17 @@ contract VadiumHook is IHooks, SafeCallback {
         }
 
         // The slashed capital is parked in the LP insurance reserve, not donated
-        // instantly. A keeper later drains it to LPs in one atomic unlock.
+        // instantly. A keeper later drains it to LPs in one atomic unlock. Flag the
+        // searcher so the on-pool slash is keeper-drainable without the Reactive
+        // relay. For a first offense the flag window is twice the withdrawal-lock
+        // extension, so a keeper can still drain the slashed reserve after the
+        // residual bond matures and the searcher exits; for a repeat it tracks the
+        // ban window. Never shorten an existing, longer-active flag.
+        uint256 flagExtension =
+            isRepeat ? REPEAT_OFFENSE_BAN_BLOCKS : (2 * FIRST_OFFENSE_LOCK_EXTENSION_BLOCKS);
+        uint256 flagUntil = block.number + flagExtension;
+        if (flaggedUntil[sender] < flagUntil) flaggedUntil[sender] = flagUntil;
+
         insurance.credit(slashed);
 
         emit Sandwiched(sender, slashed, isRepeat, b.amount, bannedUntil);

@@ -19,28 +19,6 @@ contract BondManagerTest is Test {
     }
 
     // -------------------------------------------------------------------------
-    // Expiry
-    // -------------------------------------------------------------------------
-
-    function test_isMatured_returnsFalse_beforeWindow() public view {
-        assertFalse(bond.isMatured(100, 1099));
-    }
-
-    function test_isMatured_returnsTrue_atExactlyMaturity() public view {
-        // 1000 + 100 = 1100
-        assertTrue(bond.isMatured(100, 1100));
-    }
-
-    function test_isMatured_returnsTrue_afterWindow() public view {
-        assertTrue(bond.isMatured(100, 1200));
-    }
-
-    function test_isMatured_zeroDurationMaturesImmediately() public {
-        bond.depositBlock = 500;
-        assertTrue(bond.isMatured(0, 500));
-    }
-
-    // -------------------------------------------------------------------------
     // Extended lock window
     // -------------------------------------------------------------------------
 
