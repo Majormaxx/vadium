@@ -140,11 +140,12 @@ Runtime bytecode is 20.5 kB.
 
 | Chain | Contract | Address |
 |---|---|---|
-| Unichain Sepolia (1301) | `VadiumHook` (earlier interface) | `0x6d6201097d6549F9760d61019E69E599315dc0C0` |
-| Unichain Sepolia (1301) | ETH/USDC pool, 30 bps, spacing 10 | `0x8e04e9c3fd9137cdc79ef352d1b1af9c5b3c5384cca2d8641c754bd6a2000304` |
+| Unichain Sepolia (1301) | `VadiumHook` | `0x67D06225c8081Fc19f4E2722a45A4cec0e9320C4` |
+| Unichain Sepolia (1301) | ETH/USDC pool, 30 bps, spacing 10 | `0x3f02e4e1ac6b345b44b5c816aee451d7a632ffc58d76cbefbdcc348cdc31feb1` |
+| Unichain Sepolia (1301) | Liquidity router (owner-held seed position) | `0x22d0081678Fe1E47cde6fd85512C6BFaB3849BF7` |
 | Unichain (130) | | not yet |
 
-The record of each deploy lives in [`deployments/`](deployments/). The current Sepolia addresses run the hook as it was before the clamp and refund were added; the next broadcast replaces them.
+Deployed at block 63,625,157 from commit `9c8979f`, with the minimum bond lowered to 5 USDC for the testnet. The record of each deploy lives in [`deployments/`](deployments/). Explorer verification needs an Etherscan API v2 key (`ETHERSCAN_API_KEY`); the Uniscan v1 endpoint no longer accepts submissions.
 
 ## Run it
 
