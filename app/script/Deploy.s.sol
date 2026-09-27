@@ -37,7 +37,6 @@ contract DeployVadium is Script {
     uint160 constant SQRT_PRICE_1_1 = 79228162514264337593543950336;
     uint24 constant POOL_FEE = 3_000;
     int24 constant TICK_SPACING = 10;
-    address constant CREATE2_FACTORY = 0x4e59b44847b379578588920cA78FbF26c0B4956C;
 
     function run() external {
         Chains.Config memory chain = Chains.get(block.chainid);
