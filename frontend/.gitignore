@@ -1,0 +1,15 @@
+# Env
+.env*
+!.env.example
+
+# Generated from the repo's forge artifacts (node ../scripts/export-artifacts.mjs)
+src/generated/
+
+# Rendered from brand-src (node scripts/export-brand.mjs)
+public/brand/
+
+# Build
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo

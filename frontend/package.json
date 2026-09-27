@@ -2,7 +2,8 @@
   "name": "vadium-frontend",
   "version": "0.1.0",
   "private": true,
-  "description": "Vadium web app: public landing page and live dashboard for a swap-protection hook.",
+  "description": "Vadium status site: read-only view of the hook's pools, bonds, slashes, and refunds.",
+  "packageManager": "pnpm@10.33.0",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,18 +12,13 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "brand": "node scripts/export-brand.mjs",
-    "abis": "node scripts/fetch-abis.mjs",
-    "router:build": "bash contracts/build-artifact.sh"
+    "abis": "node ../scripts/export-artifacts.mjs && node scripts/check-abi.mjs"
   },
   "dependencies": {
-    "@tanstack/react-query": "^5.102.8",
-    "@wagmi/connectors": "^8.2.0",
     "next": "^16.3.4",
     "react": "^19.2.8",
     "react-dom": "^19.2.8",
-    "viem": "^2.56.3",
-    "wagmi": "^3.7.7",
-    "zustand": "^5.0.15"
+    "viem": "^2.56.3"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.1.0",
