@@ -1,41 +1,45 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.26;
 
+import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { IPoolManager } from "v4-core/src/interfaces/IPoolManager.sol";
-import { Currency } from "v4-core/src/types/Currency.sol";
-import { IHooks } from "v4-core/src/interfaces/IHooks.sol";
+import { PoolId } from "v4-core/src/types/PoolId.sol";
+import { PoolKey } from "v4-core/src/types/PoolKey.sol";
 
-import { VadiumHook } from "../../src/core/VadiumHook.sol";
+import { VadiumHook } from "../../src/hooks/VadiumHook.sol";
+import { IBondedFlow } from "../../src/interfaces/IBondedFlow.sol";
 
 /// @title TestVadiumHook
-/// @notice Test harness that exposes VadiumHook internals for unit testing.
-///
-/// @dev    Overrides `_donate` to record the donation without touching the real
-///         PoolManager (donate routing is covered by Integration.t.sol).
+/// @notice Test harness that exposes the base's swap-recording entrypoint and stubs the
+///         reserve donation so unit tests can run without a live pool.
 contract TestVadiumHook is VadiumHook {
     address public lastDonationRecipient;
-    uint256 public lastDonationAmount;
+    uint256 public lastDonationAmount0;
+    uint256 public lastDonationAmount1;
 
     constructor(
         IPoolManager _poolManager,
-        Currency _currency0,
-        Currency _currency1,
-        uint24 _fee,
-        int24 _tickSpacing,
+        IERC20 _bondToken,
         address _owner,
-        address _callbackProxy
-    )
-        VadiumHook(_poolManager, _currency0, _currency1, _fee, _tickSpacing, _owner, _callbackProxy)
-    { }
+        address _callbackProxy,
+        IBondedFlow.BondParams memory _params
+    ) VadiumHook(_poolManager, _bondToken, _owner, _callbackProxy, _params) { }
 
-    /// @dev Expose the internal swap-recording logic for unit testing.
-    function recordSwap(address sender, bool zeroForOne) external {
-        _recordSwap(sender, zeroForOne);
+    /// @dev Drive the detector directly, as `afterSwap` would.
+    function recordSwap(
+        PoolId poolId,
+        address sender,
+        bool zeroForOne,
+        address victimKey,
+        uint256 victimShortfallBond
+    ) external returns (uint256 slashed) {
+        return _bfRecordSwap(poolId, sender, zeroForOne, victimKey, victimShortfallBond);
     }
 
-    /// @dev Stub — records the donation amount and recipient without routing to the PoolManager.
-    function _donate(uint256 amount1) internal override {
+    /// @dev Records the donation instead of routing it through the PoolManager.
+    function _donate(PoolKey memory, uint256 amount0, uint256 amount1) internal override {
         lastDonationRecipient = address(poolManager);
-        lastDonationAmount += amount1;
+        lastDonationAmount0 += amount0;
+        lastDonationAmount1 += amount1;
     }
 }

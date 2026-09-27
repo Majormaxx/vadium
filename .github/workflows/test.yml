@@ -1,12 +1,17 @@
 name: CI
 permissions: {}
-on: [push, pull_request, workflow_dispatch]
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
 env:
   FOUNDRY_PROFILE: ci
 
 jobs:
   check:
-    name: Foundry project
+    name: Foundry
     runs-on: ubuntu-24.04
     permissions: { contents: read }
     steps:
@@ -29,5 +34,71 @@ jobs:
       - name: Build
         run: forge build --sizes
 
-      - name: Run tests
+      - name: Test (fork suites skip without an RPC)
         run: forge test -vvv
+
+      - name: Gas snapshot check
+        run: forge snapshot --check --tolerance 2 --no-match-path 'test/fork/*'
+
+      - name: Coverage
+        run: |
+          forge coverage --report lcov --report summary --no-match-path 'test/fork/*' \
+            --ir-minimum | tee coverage.txt
+          python3 - <<'PY'
+          import re
+          txt = open("coverage.txt").read()
+          rows = [l for l in txt.splitlines() if l.startswith("| src/")]
+          worst = 100.0
+          for r in rows:
+              m = re.search(r"\|\s*([\d.]+)% \(\d+/\d+\)\s*\|\s*([\d.]+)%", r)
+              if m:
+                  worst = min(worst, float(m.group(1)))
+          print(f"lowest per-file line coverage under src/: {worst:.2f}%")
+          assert worst >= 90, "line coverage below 90% on a src/ file"
+          PY
+
+  static-analysis:
+    name: Slither and Semgrep
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8bad0c8a4e52d2dcd0f5c5e5a37b5ac4f8a2e5e4 # v1.7.0
+
+      - name: Slither
+        uses: crytic/slither-action@f2ad8b5ca87a9bb8b3dc51f2e2f7ec9da15c7cf9 # v0.4.1
+        with:
+          fail-on: medium
+          slither-config: slither.config.json
+          solc-version: 0.8.26
+
+      - name: Semgrep
+        run: |
+          python3 -m pip install --quiet semgrep
+          semgrep --config p/smart-contracts --error --metrics=off src/
+
+  invariants-nightly:
+    name: Invariants (rotating seed)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8bad0c8a4e52d2dcd0f5c5e5a37b5ac4f8a2e5e4 # v1.7.0
+
+      - name: Invariants with a fresh seed
+        env:
+          FOUNDRY_FUZZ_SEED: ${{ github.run_id }}
+          FOUNDRY_INVARIANT_RUNS: 1024
+          FOUNDRY_INVARIANT_DEPTH: 50
+        run: forge test --match-path 'test/invariant/*' -vv

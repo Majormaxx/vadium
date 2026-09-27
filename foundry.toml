@@ -66,9 +66,12 @@ remappings = [
 [rpc_endpoints]
 unichain_sepolia = "${UNICHAIN_SEPOLIA_RPC}"
 unichain = "${UNICHAIN_RPC}"
+reactive_lasna = "${REACTIVE_LASNA_RPC}"
+reactive = "${REACTIVE_RPC}"
 
 [etherscan]
-unichain-sepolia = { key = "${UNISCAN_API_KEY}", chain = 1301, url = "https://api.uniscan.xyz/api" }
+unichain_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 1301, url = "https://api.etherscan.io/v2/api?chainid=1301" }
+unichain = { key = "${ETHERSCAN_API_KEY}", chain = 130, url = "https://api.etherscan.io/v2/api?chainid=130" }
 
 [fuzz]
 runs = 1000

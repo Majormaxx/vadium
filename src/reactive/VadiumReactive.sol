@@ -11,8 +11,8 @@ import { ISubscriptionService } from "reactive-lib/interfaces/ISubscriptionServi
 ///
 /// @dev    Bridges the hook's on-pool sandwich detection into a keeper-actionable
 ///         watchtower flag:
-///           1. The hook's `_slash` catches a sandwich, confiscates a portion of the
-///              bond into the LP insurance reserve, and emits `Sandwiched`.
+///           1. The hook's detector catches a sandwich, slashes the bond into the
+///              victim refund and the LP insurance reserve, and emits `Sandwiched`.
 ///           2. This contract is subscribed to `Sandwiched` on the hook (Unichain
 ///              Sepolia, origin chain 1301).
 ///           3. On receipt it emits a `Callback` back to the hook calling
@@ -25,6 +25,8 @@ import { ISubscriptionService } from "reactive-lib/interfaces/ISubscriptionServi
 ///         The hook's on-pool detector flags the searcher itself when it slashes, so
 ///         for a same-hook sandwich this relay is redundant. Its value is cross-account,
 ///         cross-block, and cross-chain flags that the hot-path detector cannot see.
+///         Experimental: the hook must be funded on the destination chain for the
+///         callback proxy's fees (see `ReactiveFlagReceiver`).
 ///
 ///         Contract owner (the ReactVM owner) can pause the notification filter or
 ///         switch which subscription/service it uses, but the core reaction is
@@ -50,8 +52,8 @@ contract VadiumReactive is AbstractReactive {
     uint64 public immutable callbackGasLimit;
 
     /// @notice The event signature this contract reacts to:
-    ///         `Sandwiched(address indexed searcher, uint256 slashed, bool isRepeat,
-    ///         uint256 remaining, uint256 bannedUntil)`.
+    ///         `Sandwiched(bytes32 indexed poolId, address indexed searcher, uint256 slashed,
+    ///         bool isRepeat, uint256 remaining, uint256 flaggedUntil, uint256 refunded)`.
     uint256 public immutable sandwichedTopic;
 
     /// @notice The ReactVM owner — the only account that can adjust parameters here.
@@ -71,7 +73,7 @@ contract VadiumReactive is AbstractReactive {
     event WatchtowerFlagQueued(
         uint256 indexed originChainId,
         address indexed searcher,
-        uint256 bannedUntil,
+        uint256 flaggedUntil,
         uint256 originBlock
     );
 
@@ -100,7 +102,9 @@ contract VadiumReactive is AbstractReactive {
         originContract = _originContract;
         callbackTarget = _callbackTarget;
         callbackGasLimit = _callbackGasLimit;
-        sandwichedTopic = uint256(keccak256("Sandwiched(address,uint256,bool,uint256,uint256)"));
+        sandwichedTopic = uint256(
+            keccak256("Sandwiched(bytes32,address,uint256,bool,uint256,uint256,uint256)")
+        );
         owner = _owner;
         enabled = true;
 
@@ -119,31 +123,32 @@ contract VadiumReactive is AbstractReactive {
     /// @param log  The intercepted log record.
     function react(IReactive.LogRecord calldata log) external vmOnly {
         if (!enabled) return;
-        // Only react to the exact event we subscribed to.
+        // Only react to the exact event we subscribed to, from the origin chain.
+        if (log.chain_id != originChainId) return;
         if (log.topic_0 != sandwichedTopic) return;
         if (log._contract != originContract) return;
         // Dedup on the origin transaction hash so one sandwich never double-flags.
         if (processed[log.tx_hash]) return;
         processed[log.tx_hash] = true;
 
-        // topic_1 = indexed `searcher` address (left-padded to 32 bytes).
-        address searcher = address(uint160(log.topic_1));
+        // topic_1 = indexed poolId, topic_2 = indexed `searcher` (left-padded).
+        address searcher = address(uint160(log.topic_2));
         if (searcher == address(0)) return;
 
         // Non-indexed data: (uint256 slashed, bool isRepeat, uint256 remaining,
-        // uint256 bannedUntil).
-        (uint256 slashed,,, uint256 bannedUntil) =
-            abi.decode(log.data, (uint256, bool, uint256, uint256));
+        // uint256 flaggedUntil, uint256 refunded).
+        (,,, uint256 flaggedUntil,) =
+            abi.decode(log.data, (uint256, bool, uint256, uint256, uint256));
 
         // The first argument is address(0) as a placeholder: Reactive Network
         // overwrites it with this contract's ReactVM ID, which the hook checks
-        // against its bound watchtower.
+        // against its bound `reactiveRvm`.
         bytes memory payload = abi.encodeWithSignature(
-            "onWatchtowerFlag(address,address,uint256)", address(0), searcher, bannedUntil
+            "onWatchtowerFlag(address,address,uint256)", address(0), searcher, flaggedUntil
         );
 
         emit Callback(originChainId, callbackTarget, callbackGasLimit, payload);
-        emit WatchtowerFlagQueued(originChainId, searcher, bannedUntil, log.block_number);
+        emit WatchtowerFlagQueued(originChainId, searcher, flaggedUntil, log.block_number);
     }
 
     /// @notice Enable or disable the reaction. Owner-only.

@@ -51,7 +51,7 @@ contract NativeLiquidityRouterTest is Test {
         });
         pm.initialize(key, 79228162514264337593543950336); // tick 0
 
-        router = new NativeLiquidityRouter(pm, address(token1));
+        router = new NativeLiquidityRouter(pm, address(token1), address(this));
     }
 
     function test_addLiquidity_setsPoolLiquidity() public {

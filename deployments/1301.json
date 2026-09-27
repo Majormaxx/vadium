@@ -3,11 +3,15 @@
   "chainName": "Unichain Sepolia",
   "commit": "69b21aa",
   "block": 61591813,
-  "deployedAt": "2026-09-03T14:04:00Z",
+  "timestamp": 1788444240,
   "hook": "0x6d6201097d6549F9760d61019E69E599315dc0C0",
+  "salt": "0x0000000000000000000000000000000000000000000000000000000000003cc9",
   "poolManager": "0x00B036B58a818B1BC34d502D3fE730Db729e62AC",
+  "stateView": "0xc199F1072a74D4e905ABa1A84d9a45E2546B6222",
   "bondToken": "0x31d0220469e10c4E71834a79b1f276d740d3768F",
   "callbackProxy": "0x9299472A6399Fd1027ebF067571Eb3e3D7837FC4",
+  "deployer": "0x4e36ee389458856E79945a07Bf1bE36261E7b6a2",
+  "owner": "0x4e36ee389458856E79945a07Bf1bE36261E7b6a2",
   "poolKey": {
     "currency0": "0x0000000000000000000000000000000000000000",
     "currency1": "0x31d0220469e10c4E71834a79b1f276d740d3768F",
@@ -16,9 +20,6 @@
     "hooks": "0x6d6201097d6549F9760d61019E69E599315dc0C0"
   },
   "poolId": "0x8e04e9c3fd9137cdc79ef352d1b1af9c5b3c5384cca2d8641c754bd6a2000304",
-  "txs": {
-    "deploy": "0x3217f76079cb3c123bd562ebde31ea09cab43fb1954e23afa5a23e15e1c66e91",
-    "initialize": "0xcdfcf85121bf7d4a83bcba9799b54c39d3c6640bb06b2d7f380bf92da52823e1"
-  },
-  "reactive": null
+  "reactive": "",
+  "note": "Earlier hook interface (pre accountable-arbitrage). Superseded by the next broadcast."
 }
