@@ -82,6 +82,49 @@ jobs:
           python3 -m pip install --quiet semgrep
           semgrep --config p/smart-contracts --error --metrics=off --severity WARNING --severity ERROR src/
 
+  services:
+    name: Services and frontend
+    runs-on: ubuntu-24.04
+    permissions: { contents: read }
+    strategy:
+      fail-fast: false
+      matrix:
+        dir: [services/keeper, services/indexer, services/sim, frontend]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@8bad0c8a4e52d2dcd0f5c5e5a37b5ac4f8a2e5e4 # v1.7.0
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: 24
+
+      - name: Enable pnpm
+        run: corepack enable && corepack prepare pnpm@10.33.0 --activate
+
+      - name: Build contracts and export artifacts
+        run: |
+          forge build
+          node scripts/export-artifacts.mjs
+
+      - name: Install, typecheck, test
+        working-directory: ${{ matrix.dir }}
+        run: |
+          pnpm install --frozen-lockfile
+          if [ -f scripts/abi.mjs ]; then node scripts/abi.mjs; fi
+          if grep -q '"codegen"' package.json; then pnpm codegen; fi
+          pnpm typecheck
+          pnpm test
+
+      - name: Build site
+        if: matrix.dir == 'frontend'
+        working-directory: frontend
+        run: pnpm build
+
   invariants-nightly:
     name: Invariants (rotating seed)
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

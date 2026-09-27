@@ -183,6 +183,17 @@ The deploy script mines the CREATE2 salt, deploys, registers the ETH/USDC pool, 
 | [`test/SimSwapRouter.t.sol`](test/SimSwapRouter.t.sol) | The one-owner bonded router used by the simulator |
 | [`test/fork/`](test/fork/) | Deployed pool state and liquidity on Unichain Sepolia |
 
+## Services
+
+Each directory is self-contained with its own tests, README, and `.env.example`. `node scripts/export-artifacts.mjs` (after `forge build`) gives each one the hook ABI and the deployment records.
+
+| Directory | Role |
+|---|---|
+| [`services/keeper`](services/keeper/) | Watches `Sandwiched` and `Flagged`, drains reserves to LPs on a schedule with a cap, serves Prometheus metrics. Refuses to start unless it holds the keeper key. |
+| [`services/indexer`](services/indexer/) | Ponder indexer with an HTTP API: pools, slashes, refunds, bonded addresses, withheld amounts, per-block price staleness, searcher history. |
+| [`services/sim`](services/sim/) | Scripted sandwich scenarios on Sepolia through owned routers, submitted as same-block batches, with a pass/fail report per expectation. Dry run by default. |
+| [`frontend`](frontend/) | Read-only Next.js site: pools, pool detail with staleness, searcher pages, mechanism explainer, status with live chain reads. |
+
 ## Known limits
 
 Stated in full in [the threat model](docs/THREAT-MODEL.md).
