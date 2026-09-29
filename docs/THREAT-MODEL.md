@@ -36,7 +36,9 @@ This document states what the hook protects, who can act on it, what each actor 
 
 ## Known holes, left open
 
-**Bonded mule.** Two bonded addresses split the sandwich legs. Each leg is that address's first swap of the block, so both are exempt from the clamp, and no single address reverses direction, so the detector never fires. Cost to the attacker: two bonds at risk to a watchtower flag with evidence. Executable statement: `test_KNOWN_bondedMuleHole` in `test/Economics.t.sol`. Closing it by exempting only one bonded swap per pool per block would throttle honest arbitrage; the watchtower path is the chosen answer.
+**Bonded mule.** Two bonded addresses split the sandwich legs. Each leg is that address's first swap of the block, so both are exempt from the clamp, and no single address reverses direction, so the same-address detector never fires. Cost to the attacker: two bonds at risk to a watchtower flag with evidence. Executable statement: `test_KNOWN_bondedMuleHole` in `test/Economics.t.sol`.
+
+Two answers exist. The watchtower can flag with evidence. And a pool can opt in to collective slashing (`setCollectiveSlash`): a bonded address with no prior swap in the block that closes a reversal opened by a different address, with a hurt swap in between, is slashed as the closer. Victim loss is always required on this path because the evidence is weaker. The false positive is a bonded address that trades against another address's earlier leg in the same block for its own reasons; the operator decides whether that trade-off suits the pool. Off by default. `test_bondedMule_slashedWhenCollectiveEnabled` shows it working on a real pool.
 
 **Refund attribution by the victim's router.** A router names the address that receives a refund. A malicious router can redirect its own user's refund to itself. It cannot touch anyone else's, because attribution is per swap and only that swap's measured shortfall funds the credit. Users choose their router; the hook cannot verify a principal without a signature scheme, which is a possible v2.
 

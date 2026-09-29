@@ -160,6 +160,25 @@ contract EconomicsTest is VadiumTestBase {
         assertEq(hook.withheld(poolId, currency1), 0, "worse than block start: nothing withheld");
     }
 
+    function test_bondedMule_slashedWhenCollectiveEnabled() public {
+        hook.setCollectiveSlash(poolId, true);
+        address mule = makeAddr("mule");
+        SwapRouter muleRouter = new SwapRouter(pm);
+        _fund(mule, muleRouter);
+        _bondThrough(searcher, searcherRouter, BOND_AMOUNT);
+        _bondThrough(mule, muleRouter, BOND_AMOUNT);
+
+        BalanceDelta d1 = _swapThrough(searcher, searcherRouter, true, -int256(ATTACK));
+        uint256 got1 = _abs(d1.amount1());
+        _swapThrough(victim, victimRouter, true, -int256(VICTIM));
+        token1.mint(mule, got1);
+        _swapThrough(mule, muleRouter, false, -int256(got1));
+
+        assertEq(hook.bondedBalance(address(muleRouter)), BOND_AMOUNT / 2, "closing leg slashed");
+        assertEq(hook.bondedBalance(address(searcherRouter)), BOND_AMOUNT, "opener untouched");
+        assertGt(hook.claimableRefund(address(victimRouter)), 0, "victim refunded");
+    }
+
     function test_KNOWN_bondedMuleHole() public {
         // Two bonded addresses split the legs. Each is its own first swap of the block,
         // so both are exempt; no address reverses, so nothing is slashed. This is the

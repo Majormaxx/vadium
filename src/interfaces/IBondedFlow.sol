@@ -66,6 +66,7 @@ interface IBondedFlow {
     event PoolRegistered(PoolId indexed poolId, address indexed operator, PoolConfig cfg);
     event PoolConfigSet(PoolId indexed poolId, PoolConfig cfg);
     event PoolOperatorSet(PoolId indexed poolId, address indexed operator);
+    event CollectiveSlashSet(PoolId indexed poolId, bool enabled);
     event BondParamsSet(BondParams params);
     event WatchtowerSet(address indexed watchtower);
     event KeeperSet(address indexed keeper);
@@ -143,6 +144,13 @@ interface IBondedFlow {
     function registerPool(PoolKey calldata key, PoolConfig calldata cfg, address operator) external;
     function setPoolConfig(PoolId poolId, PoolConfig calldata cfg) external;
     function setPoolOperator(PoolId poolId, address operator) external;
+
+    /// @notice Opt a pool into collective slashing: a bonded address whose swap closes a
+    ///         reversal opened by a different address around a swap that was hurt is
+    ///         slashed as if it had opened the reversal itself. Closes the split-leg
+    ///         (mule) evasion at the price of slashing a bonded address that happens to
+    ///         trade against another address's earlier leg in the same block.
+    function setCollectiveSlash(PoolId poolId, bool enabled) external;
     function setBondParams(BondParams calldata params) external;
     function setWatchtower(address watchtower_) external;
     function setKeeper(address keeper_) external;
@@ -200,6 +208,7 @@ interface IBondedFlow {
     function isPoolRegistered(PoolId poolId) external view returns (bool);
     function poolOperator(PoolId poolId) external view returns (address);
     function poolConfig(PoolId poolId) external view returns (PoolConfig memory);
+    function collectiveSlashEnabled(PoolId poolId) external view returns (bool);
     function poolKeyOf(PoolId poolId) external view returns (PoolKey memory);
     function unbondedFee(PoolId poolId) external view returns (uint24);
     function insuranceReserve(PoolId poolId) external view returns (uint256);

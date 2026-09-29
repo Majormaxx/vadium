@@ -4,6 +4,7 @@ pragma solidity ^0.8.26;
 import { Test } from "forge-std/Test.sol";
 import { IERC20 } from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import { PoolManager } from "v4-core/src/PoolManager.sol";
+import { BalanceDelta, BalanceDeltaLibrary } from "v4-core/src/types/BalanceDelta.sol";
 import { IPoolManager } from "v4-core/src/interfaces/IPoolManager.sol";
 import { PoolKey } from "v4-core/src/types/PoolKey.sol";
 import { PoolId, PoolIdLibrary } from "v4-core/src/types/PoolId.sol";
@@ -152,6 +153,39 @@ contract ExampleBondedHookTest is Test {
         uint256 pmBefore = token1.balanceOf(address(pm));
         hook.claimCoverage(id, 50e6);
         assertEq(token1.balanceOf(address(pm)), pmBefore + 50e6, "reserve donated to LPs");
+    }
+
+    function test_unusedHookCallbacks_returnSelectors_andGuards() public {
+        IPoolManager.ModifyLiquidityParams memory lp;
+        assertEq(
+            hook.afterInitialize(address(0), key, SQRT_1_1, 0), IHooks.afterInitialize.selector
+        );
+        assertEq(
+            hook.beforeAddLiquidity(address(0), key, lp, ""), IHooks.beforeAddLiquidity.selector
+        );
+        (bytes4 s1,) = hook.afterAddLiquidity(
+            address(0), key, lp, BalanceDeltaLibrary.ZERO_DELTA, BalanceDeltaLibrary.ZERO_DELTA, ""
+        );
+        assertEq(s1, IHooks.afterAddLiquidity.selector);
+        assertEq(
+            hook.beforeRemoveLiquidity(address(0), key, lp, ""),
+            IHooks.beforeRemoveLiquidity.selector
+        );
+        (bytes4 s2,) = hook.afterRemoveLiquidity(
+            address(0), key, lp, BalanceDeltaLibrary.ZERO_DELTA, BalanceDeltaLibrary.ZERO_DELTA, ""
+        );
+        assertEq(s2, IHooks.afterRemoveLiquidity.selector);
+        assertEq(hook.beforeDonate(address(0), key, 0, 0, ""), IHooks.beforeDonate.selector);
+        assertEq(hook.afterDonate(address(0), key, 0, 0, ""), IHooks.afterDonate.selector);
+
+        vm.prank(address(pm));
+        vm.expectRevert(IBondedFlow.UnknownUnlockKind.selector);
+        hook.unlockCallback(abi.encode(uint8(2), bytes("")));
+
+        PoolKey memory other = key;
+        other.tickSpacing = 10;
+        vm.expectRevert();
+        pm.initialize(other, SQRT_1_1);
     }
 
     function test_dynamicFee_actuallyCharged() public {

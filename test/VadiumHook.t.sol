@@ -811,6 +811,99 @@ contract VadiumHookTest is Test {
     }
 
     // -------------------------------------------------------------------------
+    // Collective slash (opt-in)
+    // -------------------------------------------------------------------------
+
+    function _mule(address a, address b, uint256 victimLoss) internal returns (uint256) {
+        hook.recordSwap(poolId, a, true, a, 0);
+        hook.recordSwap(poolId, victim, true, victim, victimLoss);
+        return hook.recordSwap(poolId, b, false, b, 0);
+    }
+
+    function test_collectiveSlash_offByDefault_muleUntouched() public {
+        _bond(searcher);
+        _bond(searcher2);
+        assertFalse(hook.collectiveSlashEnabled(poolId));
+        assertEq(_mule(searcher, searcher2, 1), 0);
+        assertEq(hook.bondedBalance(searcher2), BOND);
+    }
+
+    function test_collectiveSlash_setterAuthAndEvent() public {
+        vm.prank(victim);
+        vm.expectRevert(IBondedFlow.Unauthorized.selector);
+        hook.setCollectiveSlash(poolId, true);
+        vm.expectRevert(IBondedFlow.PoolNotRegistered.selector);
+        hook.setCollectiveSlash(_secondKey(500).toId(), true);
+        hook.setPoolOperator(poolId, searcher);
+        vm.expectEmit(true, false, false, true, HOOK_ADDR);
+        emit IBondedFlow.CollectiveSlashSet(poolId, true);
+        vm.prank(searcher);
+        hook.setCollectiveSlash(poolId, true);
+        assertTrue(hook.collectiveSlashEnabled(poolId));
+    }
+
+    function test_collectiveSlash_penalizesClosingLeg() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher);
+        _bond(searcher2);
+        uint256 slashed = _mule(searcher, searcher2, 10e6);
+        assertEq(slashed, BOND / 2, "closing bonded leg slashed");
+        assertEq(hook.bondedBalance(searcher2), BOND / 2);
+        assertEq(hook.bondedBalance(searcher), BOND, "opening leg untouched");
+        assertEq(hook.claimableRefund(victim), 10e6, "victim refunded from the closer");
+        assertTrue(hook.flaggedUntil(searcher2) > block.number);
+    }
+
+    function test_collectiveSlash_unbondedOpener_stillPenalizesBondedCloser() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher2);
+        assertEq(_mule(searcher, searcher2, 1), BOND / 2);
+    }
+
+    function test_collectiveSlash_requiresVictimLoss_evenWhenConfigDoesNot() public {
+        hook.setCollectiveSlash(poolId, true);
+        IBondedFlow.PoolConfig memory c = _cfg();
+        c.requireVictimLoss = false;
+        hook.setPoolConfig(poolId, c);
+        _bond(searcher);
+        _bond(searcher2);
+        assertEq(_mule(searcher, searcher2, 0), 0, "unhurt middle swap: no collective slash");
+    }
+
+    function test_collectiveSlash_sameDirectionOpener_noSlash() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher2);
+        hook.recordSwap(poolId, searcher, false, searcher, 0);
+        hook.recordSwap(poolId, victim, true, victim, 1);
+        assertEq(hook.recordSwap(poolId, searcher2, false, searcher2, 0), 0);
+    }
+
+    function test_collectiveSlash_openerMustBeSameBlock() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher2);
+        hook.recordSwap(poolId, searcher, true, searcher, 0);
+        vm.roll(block.number + 1);
+        hook.recordSwap(poolId, victim, true, victim, 1);
+        assertEq(hook.recordSwap(poolId, searcher2, false, searcher2, 0), 0);
+    }
+
+    function test_collectiveSlash_unbondedCloser_noPenalty() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher);
+        assertEq(_mule(searcher, searcher2, 1), 0);
+        assertEq(hook.flaggedUntil(searcher2), 0);
+    }
+
+    function test_collectiveSlash_disablingClearsPrior() public {
+        hook.setCollectiveSlash(poolId, true);
+        _bond(searcher2);
+        hook.recordSwap(poolId, searcher, true, searcher, 0);
+        hook.recordSwap(poolId, victim, true, victim, 1);
+        hook.setCollectiveSlash(poolId, false);
+        assertEq(hook.recordSwap(poolId, searcher2, false, searcher2, 0), 0);
+    }
+
+    // -------------------------------------------------------------------------
     // Penalties, flags, reserve, refunds
     // -------------------------------------------------------------------------
 
@@ -1370,6 +1463,52 @@ contract VadiumHookTest is Test {
         vm.prank(searcher);
         vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
         h.withdrawBond();
+    }
+
+    // -------------------------------------------------------------------------
+    // Unused IHooks callbacks return their selectors
+    // -------------------------------------------------------------------------
+
+    function test_unusedHookCallbacks_returnSelectors() public view {
+        IPoolManager.ModifyLiquidityParams memory lp;
+        assertEq(
+            hook.afterInitialize(address(0), poolKey, SQRT_1_1, 0), IHooks.afterInitialize.selector
+        );
+        assertEq(
+            hook.beforeAddLiquidity(address(0), poolKey, lp, ""), IHooks.beforeAddLiquidity.selector
+        );
+        (bytes4 s1, BalanceDelta d1) = hook.afterAddLiquidity(
+            address(0),
+            poolKey,
+            lp,
+            BalanceDeltaLibrary.ZERO_DELTA,
+            BalanceDeltaLibrary.ZERO_DELTA,
+            ""
+        );
+        assertEq(s1, IHooks.afterAddLiquidity.selector);
+        assertEq(BalanceDelta.unwrap(d1), 0);
+        assertEq(
+            hook.beforeRemoveLiquidity(address(0), poolKey, lp, ""),
+            IHooks.beforeRemoveLiquidity.selector
+        );
+        (bytes4 s2, BalanceDelta d2) = hook.afterRemoveLiquidity(
+            address(0),
+            poolKey,
+            lp,
+            BalanceDeltaLibrary.ZERO_DELTA,
+            BalanceDeltaLibrary.ZERO_DELTA,
+            ""
+        );
+        assertEq(s2, IHooks.afterRemoveLiquidity.selector);
+        assertEq(BalanceDelta.unwrap(d2), 0);
+        assertEq(hook.beforeDonate(address(0), poolKey, 0, 0, ""), IHooks.beforeDonate.selector);
+        assertEq(hook.afterDonate(address(0), poolKey, 0, 0, ""), IHooks.afterDonate.selector);
+    }
+
+    function test_unlockCallback_unknownKind_reverts() public {
+        vm.prank(address(pm));
+        vm.expectRevert(IBondedFlow.UnknownUnlockKind.selector);
+        hook.unlockCallback(abi.encode(uint8(9), bytes("")));
     }
 
     // -------------------------------------------------------------------------

@@ -18,3 +18,4 @@ The clamp is ported from OpenZeppelin's implementation rather than inherited, be
 - A bonded arbitrageur moves the price; later clamped swaps in the same block get the worse of block-start and current price, and LPs receive the difference. The next block's checkpoint includes the move.
 - A bonded attacker's second leg is clamped like anyone else's and the bond is slashed.
 - A pool with no bonded participants degrades to the plain clamp's stale-price behavior. Operators can disable the clamp per pool.
+- Splitting a sandwich across two bonded addresses evades the same-address detector. Operators can opt a pool into collective slashing, which penalizes the bonded closer of such a shape at the cost of a false positive on independent opposite-direction bonded flow in the same block.

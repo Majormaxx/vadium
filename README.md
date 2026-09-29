@@ -96,7 +96,7 @@ v4 only honors a `beforeSwap` fee override on dynamic-fee pools, so a fee discou
 | Role | Functions | Set by |
 |---|---|---|
 | Owner (two-step) | `registerPool`, `setPoolConfig`, `setPoolOperator`, `setBondParams`, `setWatchtower`, `setKeeper`, `setReactiveRvm`, `pause`, `unpause`, `claimCoverage`, `sweepUnclaimed`, `sweepToken`, `rescueNative` | Constructor, `transferOwnership` + `acceptOwnership` |
-| Pool operator | `setPoolConfig` for its pool | Owner |
+| Pool operator | `setPoolConfig`, `setCollectiveSlash` for its pool | Owner |
 | Keeper | `drainFlagged(poolId, searchers, maxAmount)` | Owner, rotatable |
 | Watchtower | `flagFromWatchtower(poolId, searcher, amount, banUntil, evidenceHash)` | Owner, rotatable |
 | Reactive RVM | `onWatchtowerFlag` through the callback proxy; extend-only | Owner, rotatable |
@@ -116,7 +116,7 @@ A pause blocks bonding, refund claims, flushes, and payouts, and strips every ex
 | `RefundClaimed(victim, amount)` | A credit is claimed |
 | `Flagged(searcher, poolId, slashed, evidenceHash, flaggedUntil)` | Watchtower or relay flag |
 | `CoverageClaimed(poolId, amount, remainingReserve)` | Reserve paid to LPs |
-| `Bonded`, `BondWithdrawn`, `PoolRegistered`, `PoolConfigSet`, `PoolOperatorSet`, `BondParamsSet`, `WatchtowerSet`, `KeeperSet`, `ReactiveRvmSet`, `UnclaimedSwept`, `TokenSwept`, `NativeRescued` | Lifecycle and administration |
+| `Bonded`, `BondWithdrawn`, `PoolRegistered`, `PoolConfigSet`, `PoolOperatorSet`, `CollectiveSlashSet`, `BondParamsSet`, `WatchtowerSet`, `KeeperSet`, `ReactiveRvmSet`, `UnclaimedSwept`, `TokenSwept`, `NativeRescued` | Lifecycle and administration |
 
 ### Errors
 
@@ -128,11 +128,11 @@ Figures from [`.gas-snapshot`](.gas-snapshot) under the CI profile, measured as 
 
 | Scenario | Gas |
 |---|---|
-| Bond through a router | 125,980 |
-| Unbonded swap, first in block (checkpoint + record) | 259,477 |
-| Front-run, victim, back-run with slash and refund | 776,839 |
-| Withdraw bond | 154,900 |
-| Flush withheld claims to LPs | 552,748 |
+| Bond through a router | 126,051 |
+| Unbonded swap, first in block (checkpoint + record) | 261,833 |
+| Front-run, victim, back-run with slash and refund | 779,921 |
+| Withdraw bond | 155,005 |
+| Flush withheld claims to LPs | 555,768 |
 
 Runtime bytecode is 20.5 kB.
 
@@ -152,7 +152,7 @@ Deployed at block 63,625,157 from commit `9c8979f`, with the minimum bond lowere
 ```
 git clone --recurse-submodules https://github.com/Majormaxx/vadium
 cd vadium && cp .env.example .env
-make test            # every suite except fork; 222 tests
+make test            # every suite except fork; 235 tests
 make test-fork       # fork suites against UNICHAIN_SEPOLIA_RPC
 make test-invariant  # invariants with a fresh seed, deeper runs
 make snapshot-check  # gas within 2% of .gas-snapshot
@@ -198,7 +198,7 @@ Each directory is self-contained with its own tests, README, and `.env.example`.
 
 Stated in full in [the threat model](docs/THREAT-MODEL.md).
 
-- Two bonded addresses can split a sandwich's legs. Neither reverses, both are exempt on their first swap, nothing is slashed. The evidence-based watchtower exists for this. `test_KNOWN_bondedMuleHole` keeps the claim honest.
+- Two bonded addresses can split a sandwich's legs. Neither reverses, both are exempt on their first swap, nothing is slashed by default. `test_KNOWN_bondedMuleHole` keeps the claim honest. A pool can opt in to collective slashing with `setCollectiveSlash`, which penalizes a bonded address that closes a reversal a different address opened around a swap that was hurt; the cost is a false positive on a bonded address that happens to trade against another's earlier leg in the same block, so it is off by default. The evidence-based watchtower remains the other answer.
 - The clamp target assumes block-start liquidity across the whole fill. Exact for full-range liquidity, approximate for concentrated liquidity outside the band.
 - A refund goes to whoever the victim's router named, or to the router itself.
 - The keeper decides when to drain a reserve and the in-range LPs at that moment receive it.

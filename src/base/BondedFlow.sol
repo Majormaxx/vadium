@@ -83,6 +83,10 @@ abstract contract BondedFlow is
         address lastSwapper;
         address lastVictimKey;
         uint96 lastVictimShortfall;
+        // Swapper before `lastSwapper` in the same block; tracked only under
+        // collective slashing.
+        address priorSwapper;
+        bool collectiveSlash;
         mapping(address => SwapRecord) lastSwap;
     }
 
@@ -194,6 +198,16 @@ abstract contract BondedFlow is
     }
 
     /// @inheritdoc IBondedFlow
+    function setCollectiveSlash(PoolId poolId, bool enabled) external override {
+        PoolState storage p = _pools[poolId];
+        if (!p.registered) revert PoolNotRegistered();
+        if (msg.sender != owner() && msg.sender != p.operator) revert Unauthorized();
+        p.collectiveSlash = enabled;
+        if (!enabled) p.priorSwapper = address(0);
+        emit CollectiveSlashSet(poolId, enabled);
+    }
+
+    /// @inheritdoc IBondedFlow
     function setBondParams(BondParams calldata params) external override onlyOwner {
         _setBondParams(params);
     }
@@ -285,8 +299,14 @@ abstract contract BondedFlow is
 
         if (rec.blockNumber == uint48(block.number)) {
             slashed = _detectAndPenalize(poolId, p, sender, rec.zeroForOne, zeroForOne);
+        } else if (p.collectiveSlash) {
+            slashed = _detectCollective(poolId, p, sender, zeroForOne);
         }
 
+        if (p.collectiveSlash) {
+            p.priorSwapper =
+                p.lastRecordedBlock == uint48(block.number) ? p.lastSwapper : address(0);
+        }
         rec.blockNumber = uint48(block.number);
         rec.zeroForOne = zeroForOne;
         p.lastRecordedBlock = uint48(block.number);
@@ -307,6 +327,27 @@ abstract contract BondedFlow is
     ) internal returns (uint256 slashed) {
         (bool hit, uint256 shortfall) = _matches(p, sender, priorDirection, currentDirection);
         if (!hit) return 0;
+        return _applyPenalty(poolId, p, sender, shortfall);
+    }
+
+    /// @dev Collective variant: the sender has no prior swap this block, but the swap
+    ///      two places back was a different address in the opposite direction, and the
+    ///      swap in between was hurt. A bonded sender closing that shape is penalized.
+    ///      Victim loss is always required here because the evidence is weaker.
+    function _detectCollective(
+        PoolId poolId,
+        PoolState storage p,
+        address sender,
+        bool currentDirection
+    ) internal returns (uint256 slashed) {
+        if (p.lastRecordedBlock != uint48(block.number)) return 0;
+        address opener = p.priorSwapper;
+        if (opener == address(0) || opener == sender || p.lastSwapper == sender) return 0;
+        uint256 shortfall = p.lastVictimShortfall;
+        if (shortfall == 0) return 0;
+        SwapRecord storage openRec = p.lastSwap[opener];
+        if (openRec.blockNumber != uint48(block.number)) return 0;
+        if (openRec.zeroForOne == currentDirection) return 0;
         return _applyPenalty(poolId, p, sender, shortfall);
     }
 
@@ -670,6 +711,11 @@ abstract contract BondedFlow is
     /// @inheritdoc IBondedFlow
     function poolConfig(PoolId poolId) external view override returns (PoolConfig memory) {
         return _pools[poolId].cfg;
+    }
+
+    /// @inheritdoc IBondedFlow
+    function collectiveSlashEnabled(PoolId poolId) external view override returns (bool) {
+        return _pools[poolId].collectiveSlash;
     }
 
     /// @inheritdoc IBondedFlow
